@@ -1,0 +1,61 @@
+---
+- name: Deploy a Virtual Machine on vCenter/ESXi
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - community.vmware
+
+  vars:
+    vcenter_hostname: "10.0.0.176"
+    vcenter_username: "administrator@vsphere.local"
+    vcenter_password: "P@ssw0rd24"
+    datacenter_name: "MYLAB-DC"
+    cluster_name: "MYLAB-Cluster"
+    datastore_name: "datastore1"
+    template_name: "BASELINE 120"
+    vm_name: "test-vm 26"
+    vm_network: "VM_Network"
+    vm_folder: "vm"
+    vm_cpu: 1
+    vm_memory_mb: 2048
+    vm_disk_gb: 45
+    vm_guest_id: "rhel9_64Guest"
+
+  tasks:
+    - name: Deploy VM from template
+      vmware_guest:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: no
+        datacenter: "{{ datacenter_name }}"
+        cluster: "{{ cluster_name }}"
+        folder: "{{ vm_folder }}"
+        name: "{{ vm_name }}"
+        template: "{{ template_name }}"
+        state: poweredon
+        hardware:
+          memory_mb: "{{ vm_memory_mb }}"
+          num_cpus: "{{ vm_cpu }}"
+          scsi: paravirtual
+        networks:
+          - name: "{{ vm_network }}"
+            type: static
+            ip: "10.0.0.26"
+            netmask: "255.255.255.0"
+            gateway: "10.0.0.1"
+            dns_servers: ["10.0.0.11,8.8.8.8"]
+        disk:
+          - size_gb: "{{ vm_disk_gb }}"
+            type: thin
+            datastore: "{{ datastore_name }}"
+        customization:
+          hostname: "{{ vm_name }}"
+          domain: "henogez.com"
+          timezone: "America/New_York"
+        wait_for_ip_address: yes
+      register: deploy_result
+
+    - name: Show VM deployment result
+      debug:
+        var: deploy_result
