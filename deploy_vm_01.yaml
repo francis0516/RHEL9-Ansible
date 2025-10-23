@@ -15,7 +15,7 @@
     datastore_name: "datastore1"
     template_name: "BASELINE 120"
     vm_name: "test-vm 26"
-    vm_network: "VM_Network"
+    vm_network: "VM Network"
     vm_folder: "vm"
     vm_cpu: 1
     vm_memory_mb: 2048
