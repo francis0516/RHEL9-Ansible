@@ -1,0 +1,39 @@
+---
+- name: Setup RHEL 9 base utilities and reboot
+  hosts: okd-dns
+  become: true
+  tasks:
+
+  - name: Install EPEL and common packages
+    dnf:
+     name:
+       - epel-release
+       - wget
+       - bind
+       - vim
+       - unzip
+     state: present
+
+  - name: Clean all DNF cache
+    command: dnf clean all
+    changed_when: false
+
+  - name: List enabled repositories (for info/debug only)
+    command: dnf repolist
+    register: repo_list
+    changed_when: false
+
+  - name: Show enabled repositories
+    debug:
+      msg: "{{ repo_list.stdout_lines }}"
+
+  - name: Upgrade all packages
+    dnf:
+      name: "*"
+      state: latest
+      update_cache: yes
+
+  - name: Reboot the machine
+    reboot:
+      msg: "Rebooting after package upgrade"
+      reboot_timeout: 600

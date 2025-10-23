@@ -1,0 +1,33 @@
+---
+- hosts: jenkins
+  become: true
+  tasks:
+
+  - name: Backup Jenkins Configuration file
+    file:
+     path: /var/lib/Jenkins/config.xml.orig
+     state: file
+     mode: '0755'
+     backup: yes
+     src: /var/lib/Jenkins/config.xml
+
+  - name: Backup and Rename Jenkins previous WAR file
+    ansible.builtin.command: mv /usr/share/java/Jenkins.war /usr/share/java/Jenkins.war.orig
+   
+  - name: Download new Jenkins WAR file
+    get_url:
+      url: https://updates.jenkins.io/latest/jenkins.war
+      dest: /tmp/jenkins.war
+        
+  - name: Replace Jenkins WAR file
+    file:
+     path: /usr/share/java/jenkins.war
+     src: /tmp/jenkins.war
+     state: file
+     mode: '0755'
+     backup: yes
+
+  - name: Restart Jenkins Service
+    systemd:
+      name: jenkins
+      state: restarted 

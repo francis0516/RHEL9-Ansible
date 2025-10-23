@@ -1,0 +1,38 @@
+---
+- name: Install Terraform on RHEL 9
+  hosts: terraform
+  become: true
+  tasks:
+
+  - name: Update all packages
+    dnf:
+      name: "*"
+      state: latest
+
+  - name: Install required packages
+    dnf:
+      name:
+        - yum-utils
+        - curl
+        - unzip
+      state: present
+
+  - name: Add HashiCorp repository
+    get_url:
+      url: https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
+      dest: /etc/yum.repos.d/hashicorp.repo
+      mode: '0644'
+
+  - name: Install Terraform
+    dnf:
+      name: terraform
+      state: present
+        
+  - name: Verify Terraform installation
+    command: terraform version
+    register: terraform_version
+    changed_when: false
+
+  - name: Show Terraform version
+    debug:
+      msg: "{{ terraform_version.stdout }}"

@@ -1,0 +1,148 @@
+---
+- name: Install and configure Kubernetes Cluster on RHEL 9
+  hosts: workers
+  become: yes
+  tasks:
+
+  - name: Remove Docker multiple packages
+    dnf:
+     name:
+      - docker
+      - docker-client
+      - docker-client-latest
+      - docker-common
+      - docker-latest
+      - docker-latest-logrotate
+      - docker-logrotate
+      - docker-engine
+      - podman
+      - buildah
+     state: absent
+
+  - name: Install required packages
+    dnf:
+      name:
+        - yum-utils
+        - device-mapper-persistent-data
+        - lvm2
+        - dnf-plugins-core
+      state: present
+
+  - name: Add Docker repository
+    get_url:
+      url: https://download.docker.com/linux/centos/docker-ce.repo
+      dest: /etc/yum.repos.d/docker-ce.repo
+      mode: '0644'
+
+  - name: Install Docker
+    dnf:
+     name:
+       - docker-ce
+     state: present
+
+  - name: Enable and start Docker service
+    systemd:
+      name: docker
+      enabled: yes
+      state: started
+
+  - name: Disable SELinux (set to permissive mode)
+    selinux:
+      policy: targeted
+      state: permissive
+
+  - name: Disable swap
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: Remove swap entry from /etc/fstab
+    replace:
+      path: /etc/fstab
+      regexp: '^(.*swap.*)$'
+      replace: '# \1'
+
+  - name: Enable required modules
+    shell: |
+      modprobe overlay
+      modprobe br_netfilter
+
+  - name: Set sysctl params for Kubernetes networking
+    sysctl:
+      name: net.bridge.bridge-nf-call-iptables
+      value: '1'
+      state: present
+      reload: yes
+
+  - name: Import Kubernetes GPG keys
+    rpm_key:
+      state: present
+      key: "{{ item }}"
+    loop:
+       - https://packages.cloud.google.com/yum/doc/yum-key.gpg
+       - https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+
+  - name: Add Kubernetes repository
+    yum_repository:
+      name: kubernetes
+      description: Kubernetes
+      baseurl: https://pkgs.k8s.io/core:/stable:/v1.31/rpm/
+      enabled: yes
+      gpgcheck: yes
+      repo_gpgcheck: yes
+      gpgkey:
+        - https://pkgs.k8s.io/core:/stable:/v1.31/rpm/repodata/repomd.xml.key
+      exclude: kubelet kubeadm kubectl
+
+  - name: Install Kubernetes components
+    dnf:
+     name:
+       - kubelet
+       - kubeadm
+       - kubectl
+     state: present
+     disable_gpg_check: yes
+     disable_excludes: kubernetes
+
+  - name: Enable and start kubelet service
+    systemd:
+      name: kubelet
+      enabled: yes
+      state: started
+
+  - name: Move config.toml to config.toml.bak
+    command:
+      cmd: mv /etc/containerd/config.toml /etc/containerd/config.toml.bak
+    args:
+      removes: /etc/containerd/config.toml
+
+  - name: Restart containerd service
+    service:
+      name: containerd
+      enabled: yes
+      state: restarted
+
+  - name: Initialize Kubernetes control plane with kubeadm
+    command: kubeadm init --pod-network-cidr="192.168.0.0/16"
+    register: kubeadm_init
+    ignore_errors: yes
+
+  - name: Create .kube directory
+    file:
+      path: /root/.kube
+      state: directory
+      mode: '0755'
+
+  - name: Copy admin.conf to user's kube config
+    copy:
+      src: /etc/kubernetes/admin.conf
+      dest: /root/.kube/config
+      remote_src: yes
+      owner: root
+      group: root
+      mode: '0644'
+
+  - name: Install Calico CNI
+    ansible.builtin.shell: |
+      kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml
+    environment:
+      KUBECONFIG: /etc/kubernetes/admin.conf

@@ -1,0 +1,15 @@
+all:
+  vars:
+    vcenter_hostname: "10.0.0.176"
+    vcenter_username: "administrator@vsphere.local"
+    vcenter_password: "P@ssw0rd24"
+    datacenter_name: "MYLAB-DC"
+    cluster_name: "MYLAB-Cluster"
+    datastore_name: "datastore1"
+    template_name: "TEST 16"
+    vm_name: "SONARQUBE 20"
+    vm_folder: "vm"
+  #   vm_folder: "Ansible-VMs"
+    guest_os: "rhel8_64Guest"
+  hosts:
+    localhost:

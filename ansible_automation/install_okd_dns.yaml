@@ -1,0 +1,239 @@
+---
+- name: Install and Configure DNS Server (BIND) on RHEL 9
+  hosts: okd-dns
+  become: true
+  vars:
+    domain_name: "henogez.com"
+    okd_domain_name: "okd.henogez.com"
+    zone_file: "forward.henogez.com"
+    okd_zone_file: "forward.okd.henogez.com"
+    dns_ip: "10.0.0.18"  # IP of the DNS server
+    reverse_zone_name: "0.0.10.in-addr.arpa"
+    reverse_zone_file: "0.0.10.in-addr.arpa.zone"
+    host_last_octet: "18"
+  tasks:
+
+  - name: Install BIND and utilities
+    dnf:
+      name:
+        - bind
+        - bind-utils
+      state: present
+
+  - name: Enable and start named service
+    systemd:
+      name: named
+      enabled: yes
+      state: started
+
+  - name: Ensure backup directory exists
+    file:
+      path: /etc/named.backups
+      state: directory
+      mode: '0755'
+
+  - name: Backup named.conf with timestamp
+    copy:
+      src: /etc/named.conf
+      dest: "/etc/named.backups/named.conf.{{ ansible_date_time.iso8601 }}"
+      remote_src: yes
+      mode: '0644'
+
+  - name: Ensure /var/named/log directory exists
+    file:
+      path: /var/named/log
+      state: directory
+      owner: named
+      group: named
+      mode: '0750'
+
+  - name: Ensure transfer.log file exists
+    copy:
+      content: ''
+      dest: /var/named/log/transfer.log
+      owner: named
+      group: named
+      mode: '0640'
+
+  - name: Configure main BIND config
+    copy:
+      dest: /etc/named.conf
+      content: |
+        options {
+            listen-on port 53 { 127.0.0.1; 10.0.0.18; };
+            listen-on-v6 port 53 { ::1; };
+            directory     "/var/named";
+            dump-file     "/var/named/data/cache_dump.db";
+            statistics-file "/var/named/data/named_stats.txt";
+            memstatistics-file "/var/named/data/named_mem_stats.txt";
+            secroots-file   "/var/named/data/named.secroots";
+            recursing-file  "/var/named/data/named.recursing";
+            allow-query     { localhost; 10.0.0.0/24; };
+            allow-recursion { localhost; 10.0.0.0/24; };
+            forwarders { 10.0.0.1; };
+
+            recursion yes;
+            
+            dnssec-enable yes;
+            dnssec-validation yes;
+
+            managed-keys-directory "/var/named/dynamic";
+            geoip-directory "/usr/share/GeoIP";
+
+            pid-file "/run/named/named.pid";
+            session-keyfile "/run/named/session.key";
+
+            include "/etc/crypto-policies/back-ends/bind.config";
+ 
+        };
+
+        logging {
+          category notify { zone_transfer_log; };
+          category xfer-in { zone_transfer_log; };
+          category xfer-out { zone_transfer_log; };
+          channel zone_transfer_log {
+           file "/var/named/log/transfer.log" versions 10 size 50m;
+           print-time yes;
+           print-category yes;
+           print-severity yes;
+           severity info;
+         };
+        };
+
+
+        zone "{{ domain_name }}" IN {
+            type master;
+            file "{{ zone_file }}";
+            allow-update { none; };
+            allow-query { any; };
+        };
+
+  - name: Add reverse zone to named.conf
+    blockinfile:
+      path: /etc/named.conf
+      marker: "# {mark} REVERSE ZONE BLOCK"
+      block: |
+        zone "{{ reverse_zone_name }}" IN {
+            type master;
+            file "{{ reverse_zone_file }}";
+            allow-query { localhost; 10.0.0.0/24; };
+            allow-update { none; };
+        };
+
+        include "/etc/named.rfc1912.zones";
+        include "/etc/named.root.key";
+
+  - name: Create forward zone file
+    copy:
+      dest: /var/named/{{ zone_file }}
+      owner: named
+      group: named
+      mode: '0644'
+      content: |
+        $TTL 86400
+        @   IN  SOA     okd-dns.{{ domain_name }}. root.{{ domain_name }}. (
+                    2025061601 ; Serial
+                    3600       ; Refresh
+                    1800       ; Retry
+                    604800     ; Expire
+                    86400 )    ; Minimum TTL
+
+                IN  NS      okd-dns.{{ domain_name }}.
+        okd-dns IN  A       {{ dns_ip }}
+        www     IN  A       {{ dns_ip }}
+        IN      MX 10 smtp.henogez.com.
+
+        okd-dns.henogez.com.        IN  A 10.0.0.18
+        smtp.henogez.com.           IN  A 10.0.0.18
+        helper.com                  IN  A 10.0.0.18
+        helper.henogez.com.         IN  A 10.0.0.18
+        api.henogez.com.            IN  A 10.0.0.19
+        api-int.henogez.com.        IN  A 10.0.0.19
+        *.apps.henogez.com.         IN  A 10.0.0.19
+        okd4-master.henogez.com.    IN  A 10.0.0.19
+        okd4-manager.henogez.com.   IN  A 10.0.0.15
+        okd4-bootstrap.henogez.com. IN  A 10.0.0.26
+
+
+  - name: Create forward zone file
+    copy:
+      dest: /var/named/{{ okd_zone_file }}
+      owner: named
+      group: named
+      mode: '0644'
+      content: |
+        $ORIGIN okd.henogez.com.
+        $TTL 86400
+        @   IN  SOA     okd-dns.{{ okd_domain_name }}. root.{{ okd_domain_name }}. (
+                    2025061601 ; Serial
+                    3600       ; Refresh
+                    1800       ; Retry
+                    604800     ; Expire
+                    86400 )    ; Minimum TTL
+
+                IN  NS      okd-dns.{{ okd_domain_name }}.
+        okd-dns IN  A       {{ dns_ip }}
+        www     IN  A       {{ dns_ip }}      
+        api.okd4.henogez.com.             IN  A 10.0.0.18
+        api-int.okd4.henogez.com.         IN  A 10.0.0.18
+        *.apps.okd4.henogez.com.          IN  A 10.0.0.18
+        okd4-master01.okd4.henogez.com.   IN  A 10.0.0.47
+        okd4-master02.okd4.henogez.com.   IN  A 10.0.0.48
+        okd4-master03.okd4.henogez.com.   IN  A 10.0.0.49
+        okd4-compute01.okd4.henogez.com.  IN  A 10.0.0.50
+        okd4-manager.okd4.henogez.com.    IN  A 10.0.0.15
+        okd4-bootstrap.okd4.henogez.com.  IN  A 10.0.0.26
+
+
+  - name: Create reverse zone file
+    copy:
+      dest: /var/named/{{ reverse_zone_file }}
+      owner: named
+      group: named
+      mode: '0644'
+      content: |
+        $TTL 86400
+        @   IN  SOA     okd-dns.{{ domain_name }}. root.{{ domain_name }}. (
+                    2025061601 ; Serial
+                    3600       ; Refresh
+                    1800       ; Retry
+                    604800     ; Expire
+                    86400 )    ; Minimum TTL
+
+            IN  NS      okd-dns.{{ domain_name }}.
+        {{ host_last_octet }}    IN PTR  okd-dns.{{ domain_name }}.
+        19.0.0.10.in-addr.arpa.  IN  PTR api.henogez.com.
+        19.0.0.10.in-addr.arpa.  IN  PTR api-int.henogez.com.
+        19.0.0.10.in-addr.arpa.  IN  PTR okd4-master.henogez.com.
+        15.0.0.10.in-addr.arpa.  IN  PTR okd4-manager.henogez.com.
+        26.0.0.10.in-addr.arpa.  IN  PTR okd4-bootstrap.henogez.com.
+        18.0.0.10.in-addr.arpa.  IN  PTR api.okd4.henogez.com.
+        18.0.0.10.in-addr.arpa.  IN  PTR api-int.okd4.henogez.com
+        47.0.0.10.in-addr.arpa.  IN  PTR okd4-master01.okd4.henogez.com.
+        48.0.0.10.in-addr.arpa.  IN  PTR okd4-master02.okd4.henogez.com.
+        49.0.0.10.in-addr.arpa.  IN  PTR okd4-master03.okd4.henogez.com.
+        50.0.0.10.in-addr.arpa.  IN  PTR okd4-compute01.okd4.henogez.com.
+        15.0.0.10.in-addr.arpa.  IN  PTR okd4-manager.okd4.henogez.com.
+        26.0.0.10.in-addr.arpa.  IN  PTR okd4-bootstrap.okd4.henogez.com.
+
+
+  #  - name: Allow DNS through firewalld
+  #  firewalld:
+  #    service: dns
+  #    permanent: true
+  #    state: enabled
+  #    immediate: true
+
+  - name: Restart named to apply zone changes
+    systemd:
+      name: named
+      state: restarted
+
+  - name: Verify named is running
+    shell: systemctl is-active named
+    register: named_status
+    changed_when: false
+
+  - name: Show named status
+    debug:
+      msg: "named service is {{ named_status.stdout }}"

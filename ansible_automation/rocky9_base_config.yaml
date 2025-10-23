@@ -1,0 +1,63 @@
+---
+- name: Configure Rocky Linux 9 base settings
+  hosts: free
+  become: yes
+
+  vars:
+    custom_hosts_entries:
+      - { ip: "10.0.0.14", name: "freeipa-idm.henogez.com freeipa-idm" }
+
+  tasks:
+
+  - name: Install base packages
+    ansible.builtin.dnf:
+      name:
+        - epel-release
+        - wget
+        - vim
+        - curl
+        - bind
+      state: present
+      update_cache: yes
+
+  - name: Clean all DNF metadata
+    ansible.builtin.command: dnf clean all
+
+  - name: Refresh DNF repo list
+    ansible.builtin.command: dnf repolist
+    register: repolist_output
+    changed_when: false
+
+  - name: Show repo list
+    ansible.builtin.debug:
+      var: repolist_output.stdout_lines
+
+  - name: Upgrade all packages
+    ansible.builtin.dnf:
+      name: '*'
+      state: latest
+
+  - name: Disable SELinux in config file
+    ansible.builtin.replace:
+      path: /etc/sysconfig/selinux
+      regexp: '^SELINUX=.*'
+      replace: 'SELINUX=disabled'
+
+  - name: Update /etc/hosts file with custom entries
+    ansible.builtin.blockinfile:
+      path: /etc/hosts
+      block: |
+        {% for entry in custom_hosts_entries %}
+        {{ entry.ip }} {{ entry.name }}
+  #      {% endfor %}
+      marker: "# {mark} ANSIBLE MANAGED HOSTS BLOCK"
+
+  - name: Stop firewalld
+    ansible.builtin.service:
+      name: firewalld
+      state: stopped
+      enabled: no
+
+  - name: Reboot the system
+    ansible.builtin.reboot:
+      reboot_timeout: 600

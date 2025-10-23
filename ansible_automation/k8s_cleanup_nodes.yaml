@@ -1,0 +1,26 @@
+---
+- name: Reset Kubernetes node (kubeadm + cleanup)
+  hosts: master
+  become: yes
+  tasks:
+
+  - name: Reset Kubernetes using kubeadm
+    command: kubeadm reset -f
+    ignore_errors: yes
+
+  - name: Remove Kubernetes config directories
+    file:
+      path: "{{ item }}"
+      state: absent
+    loop:
+      - /etc/kubernetes
+      - /var/lib/etcd
+      - /etc/kubernetes/pki
+      - /etc/kubernetes/manifests
+      - ~/.kube
+
+  - name: Restart kubelet
+    systemd:
+      name: kubelet
+      state: restarted
+      enabled: yes

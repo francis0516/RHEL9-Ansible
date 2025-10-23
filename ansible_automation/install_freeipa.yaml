@@ -1,0 +1,69 @@
+---
+- name: Install and Configure FreeIPA on Rocky Linux 9
+  hosts: free
+  become: true
+
+  vars:
+    ipa_domain: henogez.com
+    ipa_realm: HENOGEZ.COM
+    ipa_hostname: freeipa-idm.henogez.com
+    admin_password: "password"
+    ds_password: "password"
+    setup_dns: false
+    skip_mem_check: true
+
+  tasks:
+
+  - name: Install required packages
+    dnf:
+      name:
+        - ipa-server
+        - ipa-server-dns
+        - bind-dyndb-ldap
+      state: present
+
+  - name: Enable and start firewalld
+    systemd:
+      name: firewalld
+      state: started
+      enabled: true
+  - name: Open required FreeIPA ports
+    firewalld:
+      port: "{{ item }}"
+      permanent: true
+      state: enabled
+      immediate: true
+    loop:
+        - 53/udp
+        - 53/tcp
+        - 80/tcp
+        - 443/tcp
+        - 389/tcp
+        - 636/tcp
+        - 88/tcp
+        - 88/udp
+        - 464/tcp
+        - 464/udp
+        - 123/udp
+        - 7389/tcp
+        - 9443/tcp
+        - 9444/tcp
+        - 953/tcp
+
+  - name: Run FreeIPA installer (without DNS)
+    command: >
+      ipa-server-install -U
+      --hostname={{ ipa_hostname }}
+      --domain={{ ipa_domain }}
+      --realm={{ ipa_realm }}
+      --ds-password={{ ds_password }}
+      --admin-password={{ admin_password }}
+      {% if skip_mem_check %}--skip-mem-check{% endif %}
+    args:
+      creates: /etc/ipa/default.conf
+
+  - name: Enable and start IPA services
+    systemd:
+      name: ipa
+      state: started
+      enabled: true

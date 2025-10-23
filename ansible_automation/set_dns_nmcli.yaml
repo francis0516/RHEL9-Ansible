@@ -1,0 +1,30 @@
+---
+- name: Configure DNS via nmcli on RHEL 9
+  hosts: devops
+  become: true
+  tasks:
+
+  - name: Set custom DNS server for 'ens33'
+    ansible.builtin.command:
+      cmd: nmcli con mod ens33 ipv4.dns "10.0.0.35 8.8.8.8 8.8.4.4"
+
+  - name: Disable auto DNS for 'ens33'
+    ansible.builtin.command:
+      cmd: nmcli con mod ens33 ipv4.ignore-auto-dns yes
+
+  - name: Bring down the network connection 'ens33'
+    ansible.builtin.command:
+      cmd: nmcli con down ens33
+
+  - name: Bring up the network connection 'ens33'
+    ansible.builtin.command:
+      cmd: nmcli con up ens33
+
+  - name: Verify /etc/resolv.conf now uses 10.0.0.35
+    ansible.builtin.command:
+      cmd: grep '^nameserver' /etc/resolv.conf
+    register: resolvconf_output
+
+  - name: Show updated /etc/resolv.conf nameserver
+    ansible.builtin.debug:
+      msg: "{{ resolvconf_output.stdout_lines }}"

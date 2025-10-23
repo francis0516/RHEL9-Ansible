@@ -1,0 +1,89 @@
+---
+- name: Install and configure Jenkins on RHEL 9
+  hosts: jenkins
+  become: true
+
+  vars:
+    jenkins_repo_url: https://pkg.jenkins.io/redhat-stable/jenkins.repo
+    jenkins_repo_key_url: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+  #  jenkins_port: 8080
+
+  tasks:
+
+  - name: Creation of directory java_package using Ansible playbook
+    file: path=/root/java_package state=directory
+
+  - name: Copy rpm file to remote or target server
+    copy:
+      src: /root/java_package/jdk-17.0.13_linux-x64_bin.rpm
+      dest: /root/java_package/jdk-17.0.13_linux-x64_bin.rpm
+
+  - name: Installed java 17 rpm file
+    args:
+     chdir: /root/java_package
+    shell: dnf localinstall jdk-17.0.13_linux-x64_bin.rpm -y
+
+  - name: Install required system packages
+    dnf:
+      name:
+         - wget
+      state: present
+
+  - name: Add Jenkins repository
+    get_url:
+      url: "{{ jenkins_repo_url }}"
+      dest: /etc/yum.repos.d/jenkins.repo
+      mode: '0644'
+
+  - name: Import Jenkins repository key
+    rpm_key:
+      state: present
+      key: "{{ jenkins_repo_key_url }}"
+
+  - name: Clean cache and update the package index from sources
+    shell: dnf clean all; dnf repolist
+
+  - name: Install Jenkins Package
+    dnf:
+     name: jenkins
+     state: latest
+     disable_gpg_check: true
+
+  - name: Create jenkins group
+    group:
+     name: jenkins
+     state: present
+
+  - name: Create jenkins user
+    user:
+     name: jenkins
+     group: jenkins
+     state: present
+
+  - name: Enable and start Jenkins service
+    systemd:
+      name: jenkins
+      enabled: yes
+      state: started
+
+  # - name: Ensure firewalld is running
+  #  service:
+  #     name: firewalld
+  #     state: started
+  #     enabled: true
+
+  # - name: Open port {{ jenkins_port }} in the firewall
+  # firewalld:
+  #    port: "{{ jenkins_port }}/tcp"
+  #    permanent: yes
+  #    state: enabled
+  #    immediate: yes
+
+  - name: Print Jenkins initial admin password
+    command: cat /var/lib/jenkins/secrets/initialAdminPassword
+    register: jenkins_admin_password
+    changed_when: false
+
+  - name: Display Jenkins initial admin password
+    debug:
+      msg: "Initial Jenkins admin password: {{ jenkins_admin_password.stdout }}"

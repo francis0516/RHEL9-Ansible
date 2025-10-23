@@ -1,0 +1,198 @@
+--- 
+- name: Install and configure SonarQube on RHEL 9
+  hosts: sonarqube
+  become: true
+  vars:
+    vars:
+    sonar_version: "25.6.0.109173"
+    sonar_user: sonar
+    sonar_group: sonar
+    sonar_home: /opt/sonarqube
+    postgres_password: "password"
+    db_name: sonarqube
+    db_user: sonar
+    db_password: "sonar"
+    postgresql_version: 16
+    postgresql_service: "postgresql-16"
+
+  tasks:
+  - name: Install SonarQube dependencies packages
+    dnf: 
+     name: 
+       - wget
+       - unzip 
+     state: present
+
+  - name: Create a directory java_package using Ansible playbook
+    file: path=/root/java_package state=directory
+
+  - name: Copy java jdk 17 rpm file to remote or target server
+    copy:
+      src: /root/java_package/jdk-17.0.13_linux-x64_bin.rpm
+      dest: /root/java_package/jdk-17.0.13_linux-x64_bin.rpm
+
+  - name: Installed java 17 rpm file
+    args:
+      chdir: /root/java_package
+    shell: dnf localinstall jdk-17.0.13_linux-x64_bin.rpm -y
+
+  - name: Install and Configure the PostgreSQL RPM Repository
+    dnf:
+      name: https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+      state: present
+      disable_gpg_check: true
+
+  - name: Disable the default PostgreSQL module once the repository is added
+    shell: yum -qy module disable postgresql
+
+  - name: Install the PostgreSQL 16 database server
+    dnf: 
+     name: 
+      - postgresql{{ postgresql_version }}
+      - postgresql{{ postgresql_version }}-server
+      - python3-psycopg2
+     state: present
+
+  - name: Initialize Postgres Database
+    command: "/usr/pgsql-{{ postgresql_version }}/bin/postgresql-{{ postgresql_version }}-setup initdb"
+    args:
+      creates: "/var/lib/pgsql/16/data/PG_VERSION"
+
+  - name: Start and Enable the postgresql-16 service
+    systemd:
+      name: postgresql-{{ postgresql_version }}
+      state: started
+      enabled: true   
+
+  - name: Set PostgreSQL password and create SonarQube DB
+    become: true
+    become_user: postgres
+    shell: |
+      psql -c "ALTER USER postgres WITH PASSWORD '{{ postgres_password }}';"
+      psql -c "CREATE USER {{ db_user }} WITH PASSWORD '{{ db_password }}';"
+      psql -c "ALTER USER {{ db_user }} WITH ENCRYPTED password '{{ db_password }}';"
+      psql -c "CREATE DATABASE {{ db_name }} OWNER {{ db_user }};"
+      psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ db_name }} TO {{ db_user }};"
+      psql -c "ALTER ROLE {{ db_user }} SET client_encoding TO 'utf8';"
+      psql -c "ALTER ROLE {{ db_user }} SET default_transaction_isolation TO 'read committed';"
+      psql -c "ALTER ROLE {{ db_user }} SET timezone TO 'UTC';"
+    args:
+      executable: /bin/bash
+
+  - name: Update pg_hba.conf for password auth
+    lineinfile:
+      path: /var/lib/pgsql/16/data/pg_hba.conf
+      regexp: '^host\s+{{ db_name }}\s+{{ db_user }}\s+127\.0\.0\.1/32\s+'
+      line: "host    {{ db_name }}    {{ db_user }}    127.0.0.1/32    md5"
+      state: present
+    notify: Restart PostgreSQL
+
+  - name: Download SonarQube
+    get_url:
+      url: "https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-{{ sonar_version }}.zip"
+      dest: /tmp/sonarqube.zip
+
+  - name: Unpack SonarQube
+    unarchive:
+      src: /tmp/sonarqube.zip
+      dest: /opt/
+      remote_src: yes
+      creates: "/opt/sonarqube-{{ sonar_version }}"
+
+  - name: Symlink to /opt/sonarqube
+    file:
+      src: "/opt/sonarqube-{{ sonar_version }}"
+      dest: "{{ sonar_home }}"
+      state: link
+      force: true
+
+  - name: Create SonarQube user
+    user:
+      name: "{{ sonar_user }}"
+      shell: /sbin/nologin
+      system: true
+      home: "{{ sonar_home }}"
+
+  - name: Set ownership of SonarQube
+    file:
+      path: "{{ sonar_home }}"
+      state: directory
+      recurse: yes
+      owner: "{{ sonar_user }}"
+      group: "{{ sonar_group }}"
+
+  - name: Configure SonarQube database
+    lineinfile:
+      path: "{{ sonar_home }}/conf/sonar.properties"
+      regexp: '^#?sonar.jdbc.url='
+      line: "sonar.jdbc.url=jdbc:postgresql://localhost/{{ db_name }}"
+    notify: Restart SonarQube
+
+  - name: Configure SonarQube username and password
+    blockinfile:
+      path: "{{ sonar_home }}/conf/sonar.properties"
+      block: |
+        sonar.jdbc.username={{ db_user }}
+        sonar.jdbc.password={{ db_password }}
+
+  - name: Create SonarQube systemd service
+    copy:
+      dest: /etc/systemd/system/sonarqube.service
+      content: |
+        [Unit]
+        Description=SonarQube service
+        After=syslog.target network.target
+
+        [Service]
+        Type=forking
+
+        ExecStart={{ sonar_home }}/bin/linux-x86-64/sonar.sh start
+        ExecStop={{ sonar_home }}/bin/linux-x86-64/sonar.sh stop
+        User={{ sonar_user }}
+        Group={{ sonar_group }}
+        Restart=always
+        LimitNOFILE=65536
+        LimitNPROC=4096
+
+        [Install]
+        WantedBy=multi-user.target
+
+  - name: Reload systemd
+    systemd:
+      daemon_reload: yes
+
+  - name: Enable and start SonarQube
+    systemd:
+      name: sonarqube
+      enabled: yes
+      state: started
+
+  - name: Set sysctl values for Elasticsearch
+    sysctl:
+      name: "{{ item.name }}"
+      value: "{{ item.value }}"
+      state: present
+      sysctl_set: yes
+      reload: yes
+    loop:
+      - { name: "vm.max_map_count", value: "262144" }
+      - { name: "fs.file-max", value: "65536" }
+
+  - name: Set limits for SonarQube user
+    blockinfile:
+      path: /etc/security/limits.conf
+      block: |
+        sonarqube  -  nofile  65536
+        sonarqube  -  nproc   4096
+      marker: "# {mark} ANSIBLE MANAGED SONARQUBE LIMITS"
+
+  handlers:
+    - name: Start and Enable the postgresql-16 service
+      systemd:
+        name: postgresql-{{ postgresql_version }}
+        state: started
+
+    - name: Restart SonarQube
+      systemd:
+        name: sonarqube
+        state: restarted 
