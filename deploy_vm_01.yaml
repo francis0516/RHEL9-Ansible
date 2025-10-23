@@ -1,6 +1,7 @@
 ---
 - name: Deploy a Virtual Machine on vCenter/ESXi
   hosts: localhost
+  connection: local
   gather_facts: false
   collections:
     - community.vmware
