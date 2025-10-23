@@ -19,7 +19,7 @@
     vm_folder: "vm"
     vm_cpu: 1
     vm_memory_mb: 2048
-    vm_disk_gb: 45
+    vm_disk_gb: 70
     vm_guest_id: "rhel9_64Guest"
 
   tasks:
