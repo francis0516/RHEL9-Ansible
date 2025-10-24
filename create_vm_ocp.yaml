@@ -3,8 +3,6 @@
   hosts: localhost
   connection: local
   gather_facts: false
-  kubernetes.core.k8s:
-    state: present
 
   vars:
     vm_name: apache-vm
