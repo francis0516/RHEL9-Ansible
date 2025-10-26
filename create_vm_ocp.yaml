@@ -15,7 +15,7 @@
     cpu_threads: 1
     cloud_init_password: password
     ssh_timeout: 300
-    network_attachment: br-ex-network
+    network_attachment: br-ex
 
   tasks:
     - name: Display VM configuration
