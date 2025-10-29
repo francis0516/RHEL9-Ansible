@@ -85,7 +85,7 @@
                         masquerade: {}
                 networks:
                   - name: default
-                    pod:
+                    pod: {}
                     #  networkName: "{{ network_attachment }}"
                 volumes:
                   - name: rootdisk
