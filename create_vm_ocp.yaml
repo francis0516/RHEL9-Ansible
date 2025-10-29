@@ -182,7 +182,7 @@
         host: "{{ vm_ipv6 }}"
         port: 22
         delay: 10
-        timeout: 180
+        timeout: 360
         state: started
       when: vm_ipv6 != 'Not assigned yet'
 
