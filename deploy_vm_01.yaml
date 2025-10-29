@@ -14,7 +14,7 @@
     cluster_name: "MYLAB-Cluster"
     datastore_name: "datastore1"
     template_name: "BASELINE 120"
-    vm_name: "test-vm 26"
+    vm_name: "ocp-service 17"
     vm_network: "VM Network"
     vm_folder: "vm"
     vm_cpu: 1
@@ -42,10 +42,10 @@
         networks:
           - name: "{{ vm_network }}"
             type: static
-            ip: "10.0.0.26"
+            ip: "10.0.0.17"
             netmask: "255.255.255.0"
             gateway: "10.0.0.1"
-            dns_servers: ["10.0.0.11,8.8.8.8"]
+            dns_servers: ["10.0.0.17,8.8.8.8"]
         disk:
           - size_gb: "{{ vm_disk_gb }}"
             type: thin
