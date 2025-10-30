@@ -82,11 +82,11 @@
                           bus: virtio
                     interfaces:
                       - name: default
-                        masquerade: {}
+                        bridge: {}
                 networks:
                   - name: default
-                    pod: {}
-                    #  networkName: "{{ network_attachment }}"
+                    multus:
+                      networkName: "{{ network_attachment }}"
                 volumes:
                   - name: rootdisk
                     dataVolume:
