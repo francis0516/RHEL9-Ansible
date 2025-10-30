@@ -3,7 +3,10 @@
   hosts: localhost
   connection: local
   gather_facts: false
+<<<<<<< HEAD
 
+=======
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
   vars:
     vm_name: apache-vm
     vm_project: vm-migration-test
@@ -16,6 +19,10 @@
     cloud_init_password: password
     ssh_timeout: 300
     network_attachment: br-ex-network
+<<<<<<< HEAD
+=======
+    ip_wait_time: 30  # Wait time in seconds for IPs to stabilize
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
 
   tasks:
     - name: Display VM configuration
@@ -98,6 +105,10 @@
                         ethernets:
                           eth0:
                             dhcp4: true
+<<<<<<< HEAD
+=======
+                            dhcp6: true
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
                             dhcp4-overrides:
                               use-dns: true
                       userData: |-
@@ -107,8 +118,17 @@
                         chpasswd: { expire: False }
                         ssh_pwauth: True
                         runcmd:
+<<<<<<< HEAD
                           - sed -i 's/^#PermitRootLogin./PermitRootLogin yes/' /etc/ssh/sshd_config
                           - systemctl restart sshd
+=======
+                          - systemctl enable sshd
+                          - systemctl start sshd
+                          - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+                          - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+                          - systemctl restart sshd
+                          - systemctl status sshd
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
       register: vm_creation
 
     - name: Display VM creation result
@@ -173,6 +193,7 @@
       retries: 30
       delay: 10
 
+<<<<<<< HEAD
     - name: Extract all available IP addresses from VM
       set_fact:
         vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list }}"
@@ -182,19 +203,80 @@
     - name: Set VM IP address (prefer IPv4)
       set_fact:
         vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else vm_primary_ip }}"
+=======
+    - name: Wait for IP addresses to stabilize (both IPv4 and IPv6)
+      debug:
+        msg: "Waiting {{ ip_wait_time }} seconds for both IPv4 and IPv6 addresses to be assigned..."
+
+    - name: Pause to allow DHCP/SLAAC to complete for both IP versions
+      pause:
+        seconds: "{{ ip_wait_time }}"
+
+    - name: Refresh VM network information after waiting
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_project }}"
+        validate_certs: no
+      register: vmi_network_info
+
+    - name: Debug - Display raw interface information
+      debug:
+        msg:
+          - "All interfaces: {{ vmi_network_info.resources[0].status.interfaces }}"
+      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
+
+    - name: Extract all available IP addresses from VM
+      set_fact:
+        vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list }}"
+        vm_ipv6_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9a-fA-F:]+$') | list }}"
+        vm_primary_ip: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddress | default('Not assigned yet') }}"
+      when: vmi_network_info.resources is defined and vmi_network_info.resources | length > 0
+
+    - name: Set VM IP address (prefer IPv4, fallback to IPv6)
+      set_fact:
+        vm_ip: "{{ vm_ipv4_addresses[0] if (vm_ipv4_addresses is defined and vm_ipv4_addresses | length > 0) else (vm_ipv6_addresses[0] if (vm_ipv6_addresses is defined and vm_ipv6_addresses | length > 0) else vm_primary_ip) }}"
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
 
     - name: Display all detected IP addresses
       debug:
         msg:
+<<<<<<< HEAD
           - "Primary IP: {{ vm_primary_ip }}"
           - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None']) }}"
           - "IPv6 Addresses: {{ vm_ipv6_addresses | default(['None']) }}"
           - "Selected IP for SSH: {{ vm_ip }}"
+=======
+          - "================================================"
+          - "Network Information for {{ vm_name }}"
+          - "================================================"
+          - "Primary IP: {{ vm_primary_ip | default('Not available') }}"
+          - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None detected']) | join(', ') }}"
+          - "IPv6 Addresses: {{ vm_ipv6_addresses | default(['None detected']) | join(', ') }}"
+          - "Selected IP for SSH: {{ vm_ip }}"
+          - "================================================"
+
+    - name: Warning if no IPv4 address detected
+      debug:
+        msg: "⚠️  WARNING: No IPv4 address detected. This may affect SSH connectivity."
+      when: vm_ipv4_addresses is not defined or vm_ipv4_addresses | length == 0
+
+    - name: Info if no IPv6 address detected
+      debug:
+        msg: "ℹ️  INFO: No IPv6 address detected (this is normal if IPv6 is not configured on the network)."
+      when: vm_ipv6_addresses is not defined or vm_ipv6_addresses | length == 0
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
 
     - name: Pass VM IP to next workflow job
       set_stats:
         data:
           vm_ip: "{{ vm_ip }}"
+<<<<<<< HEAD
+=======
+          vm_ipv4: "{{ vm_ipv4_addresses | default([]) | join(',') }}"
+          vm_ipv6: "{{ vm_ipv6_addresses | default([]) | join(',') }}"
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
           vm_name: "{{ vm_name }}"
           vm_project: "{{ vm_project }}"
         per_host: no
@@ -230,12 +312,26 @@
         timeout: "{{ ssh_timeout }}"
         state: started
       register: ssh_wait
+<<<<<<< HEAD
       when: vm_ip != 'Not assigned yet'
 
     - name: Display SSH availability
       debug:
         msg: "SSH is now available on {{ vm_ip }}:22"
       when: vm_ip != 'Not assigned yet'
+=======
+      when: 
+        - vm_ip is defined
+        - vm_ip != 'Not assigned yet'
+
+    - name: Display SSH availability
+      debug:
+        msg: "✓ SSH is now available on {{ vm_ip }}:22"
+      when: 
+        - vm_ip is defined
+        - vm_ip != 'Not assigned yet'
+        - ssh_wait is succeeded
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
 
     - name: Deployment Summary
       debug:
@@ -244,10 +340,22 @@
           - "VM Deployment Complete Successfully!"
           - "======================================"
           - "VM Name: {{ vm_name }}"
+<<<<<<< HEAD
           - "IP Address: {{ vm_ip }}"
+=======
+          - "IPv4 Address(es): {{ vm_ipv4_addresses | default(['None']) | join(', ') }}"
+          - "IPv6 Address(es): {{ vm_ipv6_addresses | default(['None']) | join(', ') }}"
+          - "Primary IP: {{ vm_ip }}"
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
           - "Username: root"
           - "Password: {{ cloud_init_password }}"
           - "SSH Access: ssh root@{{ vm_ip }}"
           - "Network: {{ network_attachment }}"
           - "=========================================="
+<<<<<<< HEAD
       when: vm_ip is defined and vm_ip != 'Not assigned yet'
+=======
+      when: 
+        - vm_ip is defined 
+        - vm_ip != 'Not assigned yet'
+>>>>>>> 9a64814 (Transfer files for ocp playbook)
