@@ -21,7 +21,7 @@
     # VM Configuration
     template_name: "BASELINE 120"
     vm_name: "test01 27"
-    guest_os: "rhel9_64Guest"
+    guest_os: "rockylinux_64Guest"
     
     # Hardware Specifications
     memory_mb: 2048
