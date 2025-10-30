@@ -156,11 +156,7 @@
       debug:
         msg: "VM {{ vm_name }} is now running"
 
-    - name: Wait for VM to get IP address
-      pause:
-        seconds: 30
-
-    - name: Get VM network interface information
+    - name: Wait for VM network interfaces to be ready
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
@@ -168,46 +164,32 @@
         namespace: "{{ vm_project }}"
         validate_certs: no
       register: vmi_network_info
-
-    - name: Set VM IP address
-      set_fact:
-        vm_ipv6: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddress | default('Not assigned yet') }}"
-
-    - name: Display assigned IPv6 address
-      debug:
-        msg: "VM {{ vm_name }} IPv6: {{ vm_ipv6 }}"
-
-    - name: Wait for SSH to become available on IPv6
-      wait_for:
-        host: "{{ vm_ipv6 }}"
-        port: 22
-        delay: 10
-        timeout: 360
-        state: started
-      when: vm_ipv6 != 'Not assigned yet'
-
-    - name: SSH into VM and get IPv4 address
-      shell: |
-        sshpass -p '{{ cloud_init_password }}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@{{ vm_ipv6 }} "ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}'"
-      register: vm_ipv4_result
-      when: vm_ipv6 != 'Not assigned yet'
-      retries: 5
+      until:
+        - vmi_network_info.resources is defined
+        - vmi_network_info.resources | length > 0
+        - vmi_network_info.resources[0].status.interfaces is defined
+        - vmi_network_info.resources[0].status.interfaces | length > 0
+        - vmi_network_info.resources[0].status.interfaces[0].ipAddress is defined
+      retries: 30
       delay: 10
-      until: vm_ipv4_result.stdout != ""
 
-    - name: Set VM IPv4 address
+    - name: Extract all available IP addresses from VM
       set_fact:
-        vm_ip: "{{ vm_ipv4_result.stdout | trim }}"
-      when: vm_ipv4_result.stdout is defined and vm_ipv4_result.stdout != ""
+        vm_ipv4_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | list }}"
+        vm_ipv6_addresses: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) | select('match', '.*:.*') | list }}"
+        vm_primary_ip: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddress | default('Not assigned yet') }}"
 
-    - name: Fallback to IPv6 if IPv4 extraction failed
+    - name: Set VM IP address (prefer IPv4)
       set_fact:
-        vm_ip: "{{ vm_ipv6 }}"
-      when: vm_ip is not defined
+        vm_ip: "{{ vm_ipv4_addresses[0] if vm_ipv4_addresses | length > 0 else vm_primary_ip }}"
 
-    - name: Display final IP address to be used
+    - name: Display all detected IP addresses
       debug:
-        msg: "VM {{ vm_name }} IP (IPv4): {{ vm_ip }}"
+        msg:
+          - "Primary IP: {{ vm_primary_ip }}"
+          - "IPv4 Addresses: {{ vm_ipv4_addresses | default(['None']) }}"
+          - "IPv6 Addresses: {{ vm_ipv6_addresses | default(['None']) }}"
+          - "Selected IP for SSH: {{ vm_ip }}"
 
     - name: Pass VM IP to next workflow job
       set_stats:
