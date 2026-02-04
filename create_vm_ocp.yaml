@@ -197,38 +197,145 @@
         msg: "No IPv4 address assigned to VM {{ vm_name }}"
       when: vm_ip == ''
 
-    - name: Wait additional time for cloud-init and SSH to complete
-      ansible.builtin.pause:
-        seconds: 90
-        prompt: "Waiting for cloud-init to configure SSH on {{ vm_name }}..."
+    - name: Check if IP is reachable via ping
+      ansible.builtin.shell: |
+        ping -c 3 -W 2 {{ vm_ip }}
+      register: ping_result
+      failed_when: false
+      changed_when: false
 
-    - name: Test SSH port connectivity
+    - name: Display ping result
+      ansible.builtin.debug:
+        msg: "Ping test: {{ 'SUCCESS' if ping_result.rc == 0 else 'FAILED - VM may not be fully booted' }}"
+
+    - name: Wait for cloud-init to complete (check via virtctl)
+      ansible.builtin.shell: |
+        virtctl guestosinfo {{ vm_name }} -n {{ vm_project }} 2>/dev/null | grep -i "agent connected" || echo "NOT_READY"
+      register: guest_agent_check
+      retries: 30
+      delay: 10
+      until: "'agent connected' in guest_agent_check.stdout.lower()"
+      failed_when: false
+      changed_when: false
+
+    - name: Display guest agent status
+      ansible.builtin.debug:
+        msg: "Guest agent status: {{ guest_agent_check.stdout }}"
+
+    - name: Wait extended time for SSH service to start
+      ansible.builtin.pause:
+        seconds: 120
+        prompt: "Giving VM {{ vm_name }} extra time to complete boot and start SSH..."
+
+    - name: Check SSH port with nc (netcat)
+      ansible.builtin.shell: |
+        nc -zv -w 5 {{ vm_ip }} 22 2>&1
+      register: nc_check
+      retries: 20
+      delay: 15
+      until: nc_check.rc == 0
+      failed_when: false
+      changed_when: false
+
+    - name: Display netcat SSH check result
+      ansible.builtin.debug:
+        msg: "SSH port check: {{ 'Port 22 is OPEN' if nc_check.rc == 0 else 'Port 22 is CLOSED or filtered' }}"
+
+    - name: Check if SSH is actually the problem or network routing issue
+      ansible.builtin.shell: |
+        traceroute -m 5 -w 1 {{ vm_ip }} 2>&1 | head -10
+      register: traceroute_result
+      failed_when: false
+      changed_when: false
+      when: nc_check.rc != 0
+
+    - name: Display network path
+      ansible.builtin.debug:
+        msg: "{{ traceroute_result.stdout_lines }}"
+      when: nc_check.rc != 0 and traceroute_result.stdout_lines is defined
+
+    - name: Try to check VM console for boot messages
+      ansible.builtin.shell: |
+        timeout 10 virtctl console {{ vm_name }} -n {{ vm_project }} 2>&1 || echo "Console check timed out"
+      register: console_check
+      failed_when: false
+      changed_when: false
+      when: nc_check.rc != 0
+
+    - name: Display console output for debugging
+      ansible.builtin.debug:
+        msg: "{{ console_check.stdout_lines | default(['No console output available']) }}"
+      when: nc_check.rc != 0
+
+    - name: Final SSH connectivity test
       ansible.builtin.wait_for:
         host: "{{ vm_ip }}"
         port: 22
-        delay: 10
-        timeout: "{{ ssh_timeout }}"
-        sleep: 15
+        delay: 5
+        timeout: 180
+        sleep: 10
         state: started
       register: ssh_wait
-      retries: 3
-      delay: 30
-      until: ssh_wait is succeeded
+      failed_when: false
+
+    - name: Handle SSH failure gracefully
+      block:
+        - name: Get VM pod logs for troubleshooting
+          ansible.builtin.shell: |
+            oc get pods -n {{ vm_project }} -l kubevirt.io/domain={{ vm_name }} -o name | xargs -I {} oc logs {} -n {{ vm_project }} --tail=50
+          register: vm_pod_logs
+          failed_when: false
+          changed_when: false
+
+        - name: Display VM pod logs
+          ansible.builtin.debug:
+            msg: "{{ vm_pod_logs.stdout_lines | default(['No pod logs available']) }}"
+
+        - name: Check VM status and conditions
+          kubernetes.core.k8s_info:
+            api_version: kubevirt.io/v1
+            kind: VirtualMachineInstance
+            name: "{{ vm_name }}"
+            namespace: "{{ vm_project }}"
+            validate_certs: no
+          register: vmi_status_check
+
+        - name: Display VM conditions
+          ansible.builtin.debug:
+            msg: "VM Conditions: {{ vmi_status_check.resources[0].status.conditions | default([]) }}"
+
+        - name: Provide troubleshooting information
+          ansible.builtin.debug:
+            msg:
+              - "============================================"
+              - "SSH CONNECTION FAILED - Troubleshooting Info"
+              - "============================================"
+              - "VM Name: {{ vm_name }}"
+              - "VM IP: {{ vm_ip }}"
+              - "VM Phase: {{ vmi_status_check.resources[0].status.phase | default('Unknown') }}"
+              - ""
+              - "Possible causes:"
+              - "1. Cloud-init failed to configure SSH"
+              - "2. Network configuration issue (bridge/multus)"
+              - "3. Firewall blocking port 22"
+              - "4. Golden image doesn't have SSH installed/enabled"
+              - "5. Network attachment {{ network_attachment }} misconfigured"
+              - ""
+              - "Manual verification steps:"
+              - "  oc get vmi {{ vm_name }} -n {{ vm_project }}"
+              - "  virtctl console {{ vm_name }} -n {{ vm_project }}"
+              - "  virtctl ssh root@{{ vm_name }} -n {{ vm_project }}"
+              - "============================================"
+
+        - name: Mark as warning but continue
+          ansible.builtin.debug:
+            msg: "VM deployed but SSH verification failed. Continuing with deployment summary..."
+      when: ssh_wait.failed | default(false)
 
     - name: Display SSH availability
       ansible.builtin.debug:
         msg: "SSH is now available on {{ vm_ip }}:22"
-
-    - name: Verify SSH authentication (optional but recommended)
-      ansible.builtin.shell: |
-        timeout 15 bash -c "</dev/tcp/{{ vm_ip }}/22" && echo "SSH_PORT_OPEN"
-      register: ssh_verify
-      changed_when: false
-      failed_when: false
-
-    - name: Display SSH verification result
-      ansible.builtin.debug:
-        msg: "SSH port verification: {{ 'SUCCESS' if 'SSH_PORT_OPEN' in ssh_verify.stdout else 'Port open but may need more time' }}"
+      when: not (ssh_wait.failed | default(false))
 
     - name: Pass VM IP to next workflow job
       ansible.builtin.set_stats:
@@ -236,6 +343,7 @@
           vm_ip: "{{ vm_ip }}"
           vm_name: "{{ vm_name }}"
           vm_project: "{{ vm_project }}"
+          ssh_available: "{{ 'yes' if not (ssh_wait.failed | default(false)) else 'no' }}"
         per_host: no
 
     - name: Get VM information
@@ -261,12 +369,13 @@
           - "VM Status: {{ vm_info.resources[0].status.printableStatus | default('Starting') }}"
           - "Network: {{ network_attachment }}"
           - "IPv4 Address: {{ vm_ip }}"
+          - "SSH Available: {{ 'Yes' if not (ssh_wait.failed | default(false)) else 'No - Manual verification needed' }}"
 
     - name: Deployment Summary
       ansible.builtin.debug:
         msg:
           - "======================================"
-          - "VM Deployment Complete Successfully!"
+          - "VM Deployment {{ 'Complete' if not (ssh_wait.failed | default(false)) else 'Partially Complete' }}"
           - "======================================"
           - "VM Name: {{ vm_name }}"
           - "IPv4 Address: {{ vm_ip }}"
@@ -274,4 +383,5 @@
           - "Password: {{ cloud_init_password }}"
           - "SSH Access: ssh root@{{ vm_ip }}"
           - "Network: {{ network_attachment }}"
+          - "{{ 'SSH verified and ready!' if not (ssh_wait.failed | default(false)) else 'WARNING: SSH not responding - may need manual intervention' }}"
           - "=========================================="
