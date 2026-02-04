@@ -14,12 +14,12 @@
     cpu_sockets: 1
     cpu_threads: 1
     cloud_init_password: password
-    ssh_timeout: 300
+    ssh_timeout: 600
     network_attachment: br-ex-network
 
   tasks:
     - name: Display VM configuration
-      debug:
+      ansible.builtin.debug:
         msg:
           - "Creating VM: {{ vm_name }}"
           - "Namespace: {{ vm_project }}"
@@ -109,10 +109,11 @@
                         runcmd:
                           - sed -i 's/^#PermitRootLogin./PermitRootLogin yes/' /etc/ssh/sshd_config
                           - systemctl restart sshd
+                          - sleep 30
       register: vm_creation
 
     - name: Display VM creation result
-      debug:
+      ansible.builtin.debug:
         msg: "VM {{ vm_name }} provisioned successfully in namespace {{ vm_project }}"
       when: vm_creation.changed
 
@@ -129,11 +130,11 @@
         - dv_info.resources | length > 0
         - dv_info.resources[0].status.phase is defined
         - dv_info.resources[0].status.phase == "Succeeded"
-      retries: 30
+      retries: 60
       delay: 10
 
     - name: Display DataVolume status
-      debug:
+      ansible.builtin.debug:
         msg: "DataVolume for {{ vm_name }} is ready (Phase: {{ dv_info.resources[0].status.phase }})"
 
     - name: Wait for VM to be running
@@ -149,16 +150,16 @@
         - vmi_info.resources | length > 0
         - vmi_info.resources[0].status.phase is defined
         - vmi_info.resources[0].status.phase == "Running"
-      retries: 30
+      retries: 60
       delay: 10
 
     - name: Display VM running status
-      debug:
+      ansible.builtin.debug:
         msg: "VM {{ vm_name }} is now running"
 
     - name: Wait for VM to initialize networking
-      pause:
-        seconds: 45
+      ansible.builtin.pause:
+        seconds: 60
 
     - name: Get VM network interface information
       kubernetes.core.k8s_info:
@@ -168,47 +169,69 @@
         namespace: "{{ vm_project }}"
         validate_certs: no
       register: vmi_network_info
-      retries: 10
+      retries: 15
       delay: 10
       until:
         - vmi_network_info.resources is defined
         - vmi_network_info.resources | length > 0
         - vmi_network_info.resources[0].status.interfaces is defined
         - vmi_network_info.resources[0].status.interfaces | length > 0
+        - vmi_network_info.resources[0].status.interfaces[0].ipAddresses is defined
+        - vmi_network_info.resources[0].status.interfaces[0].ipAddresses | length > 0
 
     - name: Extract all IP addresses from VM
-      set_fact:
+      ansible.builtin.set_fact:
         vm_all_ips: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) }}"
 
     - name: Filter IPv4 address only
-      set_fact:
+      ansible.builtin.set_fact:
         vm_ip: "{{ vm_all_ips | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | first | default('') }}"
 
     - name: Display assigned IPv4 address
-      debug:
+      ansible.builtin.debug:
         msg: "VM {{ vm_name }} IPv4: {{ vm_ip }}"
       when: vm_ip != ''
 
     - name: Fail if no IPv4 address found
-      fail:
+      ansible.builtin.fail:
         msg: "No IPv4 address assigned to VM {{ vm_name }}"
       when: vm_ip == ''
 
-    - name: Wait for SSH to become available
-      wait_for:
+    - name: Wait additional time for cloud-init and SSH to complete
+      ansible.builtin.pause:
+        seconds: 90
+        prompt: "Waiting for cloud-init to configure SSH on {{ vm_name }}..."
+
+    - name: Test SSH port connectivity
+      ansible.builtin.wait_for:
         host: "{{ vm_ip }}"
         port: 22
         delay: 10
         timeout: "{{ ssh_timeout }}"
+        sleep: 15
         state: started
       register: ssh_wait
+      retries: 3
+      delay: 30
+      until: ssh_wait is succeeded
 
     - name: Display SSH availability
-      debug:
+      ansible.builtin.debug:
         msg: "SSH is now available on {{ vm_ip }}:22"
 
+    - name: Verify SSH authentication (optional but recommended)
+      ansible.builtin.shell: |
+        timeout 15 bash -c "</dev/tcp/{{ vm_ip }}/22" && echo "SSH_PORT_OPEN"
+      register: ssh_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Display SSH verification result
+      ansible.builtin.debug:
+        msg: "SSH port verification: {{ 'SUCCESS' if 'SSH_PORT_OPEN' in ssh_verify.stdout else 'Port open but may need more time' }}"
+
     - name: Pass VM IP to next workflow job
-      set_stats:
+      ansible.builtin.set_stats:
         data:
           vm_ip: "{{ vm_ip }}"
           vm_name: "{{ vm_name }}"
@@ -225,7 +248,7 @@
       register: vm_info
 
     - name: Display VM information
-      debug:
+      ansible.builtin.debug:
         msg:
           - "VM Name: {{ vm_info.resources[0].metadata.name }}"
           - "Namespace: {{ vm_info.resources[0].metadata.namespace }}"
@@ -240,7 +263,7 @@
           - "IPv4 Address: {{ vm_ip }}"
 
     - name: Deployment Summary
-      debug:
+      ansible.builtin.debug:
         msg:
           - "======================================"
           - "VM Deployment Complete Successfully!"
