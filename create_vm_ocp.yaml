@@ -125,7 +125,7 @@
         namespace: "{{ vm_project }}"
         validate_certs: no
       register: dv_info
-      until: 
+      until:
         - dv_info.resources is defined
         - dv_info.resources | length > 0
         - dv_info.resources[0].status.phase is defined
@@ -161,7 +161,7 @@
       ansible.builtin.pause:
         seconds: 60
 
-    - name: Get VM network interface information
+    - name: Get VM network interface information with IPv4 retry loop
       kubernetes.core.k8s_info:
         api_version: kubevirt.io/v1
         kind: VirtualMachineInstance
@@ -169,23 +169,38 @@
         namespace: "{{ vm_project }}"
         validate_certs: no
       register: vmi_network_info
-      retries: 15
-      delay: 10
-      until:
-        - vmi_network_info.resources is defined
-        - vmi_network_info.resources | length > 0
-        - vmi_network_info.resources[0].status.interfaces is defined
-        - vmi_network_info.resources[0].status.interfaces | length > 0
-        - vmi_network_info.resources[0].status.interfaces[0].ipAddresses is defined
-        - vmi_network_info.resources[0].status.interfaces[0].ipAddresses | length > 0
+      retries: 20
+      delay: 15
+      until: >-
+        vmi_network_info.resources is defined and
+        vmi_network_info.resources | length > 0 and
+        vmi_network_info.resources[0].status.interfaces is defined and
+        vmi_network_info.resources[0].status.interfaces | length > 0 and
+        (vmi_network_info.resources[0].status.interfaces
+          | map(attribute='ipAddresses', default=[])
+          | flatten
+          | select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+          | list | length) > 0
 
-    - name: Extract all IP addresses from VM
+    - name: Collect all IP addresses from all interfaces
       ansible.builtin.set_fact:
-        vm_all_ips: "{{ vmi_network_info.resources[0].status.interfaces[0].ipAddresses | default([]) }}"
+        vm_all_ips: >-
+          {{ vmi_network_info.resources[0].status.interfaces
+             | map(attribute='ipAddresses', default=[])
+             | flatten }}
 
-    - name: Filter IPv4 address only
+    - name: Filter strictly IPv4 addresses (exclude IPv6 and link-local)
       ansible.builtin.set_fact:
-        vm_ip: "{{ vm_all_ips | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$') | first | default('') }}"
+        vm_ipv4_list: >-
+          {{ vm_all_ips
+             | select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+             | reject('match', '^169\.254\.')
+             | reject('match', '^127\.')
+             | list }}
+
+    - name: Set primary IPv4 address
+      ansible.builtin.set_fact:
+        vm_ip: "{{ vm_ipv4_list | first | default('') }}"
 
     - name: Display assigned IPv4 address
       ansible.builtin.debug:
@@ -194,7 +209,7 @@
 
     - name: Fail if no IPv4 address found
       ansible.builtin.fail:
-        msg: "No IPv4 address assigned to VM {{ vm_name }}"
+        msg: "No IPv4 address assigned to VM {{ vm_name }}. All IPs found: {{ vm_all_ips }}"
       when: vm_ip == ''
 
     - name: Check if IP is reachable via ping
