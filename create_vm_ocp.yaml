@@ -50,7 +50,7 @@
                 spec:
                   source:
                     pvc:
-                      name: centos9-golden-image
+                      name: rhel9-golden-image
                       namespace: vm-migration-test
                   storage:
                     storageClassName: "{{ storage_class }}"
