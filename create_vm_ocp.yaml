@@ -73,6 +73,8 @@
                   memory:
                     guest: "{{ memory_size }}"
                   devices:
+                    autoattachSerialConsole: true
+                    autoattachGraphicsDevice: false
                     disks:
                       - name: rootdisk
                         disk:
@@ -98,8 +100,10 @@
                         ethernets:
                           eth0:
                             dhcp4: true
+                            dhcp6: false
                             dhcp4-overrides:
                               use-dns: true
+                              use-routes: true
                       userData: |-
                         #cloud-config
                         user: root
@@ -109,7 +113,8 @@
                         runcmd:
                           - sed -i 's/^#PermitRootLogin./PermitRootLogin yes/' /etc/ssh/sshd_config
                           - systemctl restart sshd
-                          - sleep 30
+                          - sysctl -w net.ipv6.conf.eth0.disable_ipv6=1
+                          - echo "net.ipv6.conf.eth0.disable_ipv6 = 1" >> /etc/sysctl.conf
       register: vm_creation
 
     - name: Display VM creation result
@@ -157,9 +162,33 @@
       ansible.builtin.debug:
         msg: "VM {{ vm_name }} is now running"
 
-    - name: Wait for VM to initialize networking
+    - name: Wait for VM to initialize networking and guest agent
       ansible.builtin.pause:
-        seconds: 60
+        seconds: 90
+
+    - name: Wait for guest agent to become ready
+      ansible.builtin.shell: |
+        oc get vmi {{ vm_name }} -n {{ vm_project }} \
+          -o jsonpath='{.status.conditions}' | \
+          python3 -c "
+        import sys, json
+        conditions = json.load(sys.stdin)
+        agent_ready = any(
+          c.get('type') == 'AgentConnected' and c.get('status') == 'True'
+          for c in conditions
+        )
+        print('READY' if agent_ready else 'NOT_READY')
+        "
+      register: agent_status
+      retries: 30
+      delay: 10
+      until: "'READY' in agent_status.stdout"
+      failed_when: false
+      changed_when: false
+
+    - name: Display guest agent status
+      ansible.builtin.debug:
+        msg: "Guest agent: {{ 'Connected' if 'READY' in agent_status.stdout else 'Not connected - IP may still be reported via DHCP lease' }}"
 
     - name: Get VM network interface information with IPv4 retry loop
       kubernetes.core.k8s_info:
@@ -169,7 +198,7 @@
         namespace: "{{ vm_project }}"
         validate_certs: no
       register: vmi_network_info
-      retries: 20
+      retries: 30
       delay: 15
       until: >-
         vmi_network_info.resources is defined and
@@ -180,6 +209,8 @@
           | map(attribute='ipAddresses', default=[])
           | flatten
           | select('match', '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+          | reject('match', '^169\.254\.')
+          | reject('match', '^127\.')
           | list | length) > 0
 
     - name: Collect all IP addresses from all interfaces
@@ -189,7 +220,7 @@
              | map(attribute='ipAddresses', default=[])
              | flatten }}
 
-    - name: Filter strictly IPv4 addresses (exclude IPv6 and link-local)
+    - name: Filter strictly IPv4 addresses (exclude IPv6, link-local, loopback)
       ansible.builtin.set_fact:
         vm_ipv4_list: >-
           {{ vm_all_ips
@@ -223,23 +254,9 @@
       ansible.builtin.debug:
         msg: "Ping test: {{ 'SUCCESS' if ping_result.rc == 0 else 'FAILED - VM may not be fully booted' }}"
 
-    - name: Wait for cloud-init to complete (check via virtctl)
-      ansible.builtin.shell: |
-        virtctl guestosinfo {{ vm_name }} -n {{ vm_project }} 2>/dev/null | grep -i "agent connected" || echo "NOT_READY"
-      register: guest_agent_check
-      retries: 30
-      delay: 10
-      until: "'agent connected' in guest_agent_check.stdout.lower()"
-      failed_when: false
-      changed_when: false
-
-    - name: Display guest agent status
-      ansible.builtin.debug:
-        msg: "Guest agent status: {{ guest_agent_check.stdout }}"
-
     - name: Wait extended time for SSH service to start
       ansible.builtin.pause:
-        seconds: 120
+        seconds: 60
         prompt: "Giving VM {{ vm_name }} extra time to complete boot and start SSH..."
 
     - name: Check SSH port with nc (netcat)
@@ -256,7 +273,7 @@
       ansible.builtin.debug:
         msg: "SSH port check: {{ 'Port 22 is OPEN' if nc_check.rc == 0 else 'Port 22 is CLOSED or filtered' }}"
 
-    - name: Check if SSH is actually the problem or network routing issue
+    - name: Check network routing if SSH unreachable
       ansible.builtin.shell: |
         traceroute -m 5 -w 1 {{ vm_ip }} 2>&1 | head -10
       register: traceroute_result
@@ -297,7 +314,8 @@
       block:
         - name: Get VM pod logs for troubleshooting
           ansible.builtin.shell: |
-            oc get pods -n {{ vm_project }} -l kubevirt.io/domain={{ vm_name }} -o name | xargs -I {} oc logs {} -n {{ vm_project }} --tail=50
+            oc get pods -n {{ vm_project }} -l kubevirt.io/domain={{ vm_name }} -o name | \
+              xargs -I {} oc logs {} -n {{ vm_project }} --tail=50
           register: vm_pod_logs
           failed_when: false
           changed_when: false
@@ -331,15 +349,17 @@
               - ""
               - "Possible causes:"
               - "1. Cloud-init failed to configure SSH"
-              - "2. Network configuration issue (bridge/multus)"
+              - "2. External DHCP server not reachable on br-ex-network"
               - "3. Firewall blocking port 22"
               - "4. Golden image doesn't have SSH installed/enabled"
               - "5. Network attachment {{ network_attachment }} misconfigured"
+              - "6. qemu-guest-agent virtio-serial port not available"
               - ""
               - "Manual verification steps:"
               - "  oc get vmi {{ vm_name }} -n {{ vm_project }}"
               - "  virtctl console {{ vm_name }} -n {{ vm_project }}"
               - "  virtctl ssh root@{{ vm_name }} -n {{ vm_project }}"
+              - "  virtctl guestosinfo {{ vm_name }} -n {{ vm_project }}"
               - "============================================"
 
         - name: Mark as warning but continue
