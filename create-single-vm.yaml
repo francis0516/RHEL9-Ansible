@@ -1,0 +1,167 @@
+---
+- name: Create Single VM in OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vm_name: "rhel9-vm-01"
+    namespace: "aap-vms"
+    memory: "2Gi"
+    cpu_cores: 2
+    disk_size: "30Gi"
+    storage_class: "nfs-dynamic"
+    os_image: "rhel9"
+    os_image_namespace: "openshift-virtualization-os-images"
+    nad_name: "aap-vms/external-network"
+    ssh_user: "rhel"
+    ssh_password: "redhat123"
+    ssh_public_key: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+
+  tasks:
+  - name: Create DataVolume for VM disk
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: cdi.kubevirt.io/v1beta1
+        kind: DataVolume
+        metadata:
+          name: "{{ vm_name }}-disk"
+          namespace: "{{ namespace }}"
+        spec:
+          source:
+            pvc:
+              namespace: "{{ os_image_namespace }}"
+              name: "{{ os_image }}"
+          pvc:
+            accessModes:
+            - ReadWriteMany
+            volumeMode: Filesystem
+            resources:
+              requests:
+                storage: "{{ disk_size }}"
+            storageClassName: "{{ storage_class }}"
+
+  - name: Wait for DataVolume to be ready
+    kubernetes.core.k8s_info:
+      api_version: cdi.kubevirt.io/v1beta1
+      kind: DataVolume
+      name: "{{ vm_name }}-disk"
+      namespace: "{{ namespace }}"
+    register: dv_status
+    until: dv_status.resources[0].status.phase == "Succeeded"
+    retries: 60
+    delay: 10
+
+  - name: Create VirtualMachine
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: kubevirt.io/v1
+        kind: VirtualMachine
+        metadata:
+          name: "{{ vm_name }}"
+          namespace: "{{ namespace }}"
+        spec:
+          running: true
+          template:
+            spec:
+              domain:
+                cpu:
+                  cores: "{{ cpu_cores }}"
+                memory:
+                  guest: "{{ memory }}"
+                devices:
+                  disks:
+                  - name: rootdisk
+                    disk:
+                      bus: virtio
+                  - name: cloudinitdisk
+                    disk:
+                      bus: virtio
+                  interfaces:
+                  - name: default
+                    masquerade: {}
+                  - name: external
+                    bridge: {}
+                    model: virtio
+              networks:
+              - name: default
+                pod: {}
+              - name: external
+                multus:
+                  networkName: "{{ nad_name }}"
+              volumes:
+              - name: rootdisk
+                dataVolume:
+                  name: "{{ vm_name }}-disk"
+              - name: cloudinitdisk
+                cloudInitNoCloud:
+                  userData: |
+                    #cloud-config
+                    user: {{ ssh_user }}
+                    password: {{ ssh_password }}
+                    chpasswd:
+                      expire: false
+                    ssh_pwauth: true
+                    ssh_authorized_keys:
+                      - "{{ ssh_public_key }}"
+                    runcmd:
+                      - systemctl enable sshd
+                      - systemctl start sshd
+
+  - name: Wait for VMI to be Running
+    kubernetes.core.k8s_info:
+      api_version: kubevirt.io/v1
+      kind: VirtualMachineInstance
+      name: "{{ vm_name }}"
+      namespace: "{{ namespace }}"
+    register: vmi_status
+    until:
+    - vmi_status.resources | length > 0
+    - vmi_status.resources[0].status.phase == "Running"
+    retries: 60
+    delay: 10
+
+  - name: Get VM IP address
+    kubernetes.core.k8s_info:
+      api_version: kubevirt.io/v1
+      kind: VirtualMachineInstance
+      name: "{{ vm_name }}"
+      namespace: "{{ namespace }}"
+    register: vmi_info
+
+  - name: Set VM IP fact
+    set_fact:
+      vm_ip: "{{ vmi_info.resources[0].status.interfaces | selectattr('name', 'equalto', 'external') | map(attribute='ipAddress') | first }}"
+
+  - name: Display VM details
+    debug:
+      msg:
+      - "VM Name: {{ vm_name }}"
+      - "VM IP: {{ vm_ip }}"
+      - "SSH: ssh {{ ssh_user }}@{{ vm_ip }}"
+
+  - name: Wait for SSH to be available
+    wait_for:
+      host: "{{ vm_ip }}"
+      port: 22
+      timeout: 120
+
+  - name: Add VM to inventory
+    add_host:
+      name: "{{ vm_name }}"
+      ansible_host: "{{ vm_ip }}"
+      ansible_user: "{{ ssh_user }}"
+      ansible_ssh_private_key_file: "~/.ssh/id_rsa"
+      ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      groups: new_vms
+
+- name: Configure VM after creation
+  hosts: new_vms
+  gather_facts: true
+  tasks:
+  - name: Test SSH connectivity
+    ping:
+
+  - name: Display hostname and IP
+    debug:
+      msg: "Connected to {{ ansible_hostname }} via {{ ansible_host }}"
