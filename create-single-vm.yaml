@@ -133,22 +133,39 @@
       namespace: "{{ vm_namespace }}"
     register: vmi_info
 
-  - name: Get all IPs from external interface
-    set_fact:
-      all_ips: "{{ vmi_info.resources[0].status.interfaces
-        | selectattr('name', 'equalto', 'external')
-        | map(attribute='ipAddresses')
-        | first }}"
+  - name: Debug VM interfaces
+    debug:
+      msg: "{{ vmi_info.resources[0].status.interfaces }}"
 
-  - name: Set VM IPv4 fact
+  - name: Get external interface info
     set_fact:
-      vm_ip: "{{ all_ips
-        | select('match', '^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$')
+      external_iface: "{{ vmi_info.resources[0].status.interfaces
+        | selectattr('name', 'equalto', 'external')
+        | list }}"
+
+  - name: Debug external interface
+    debug:
+      msg: "External interface: {{ external_iface }}"
+
+  - name: Set VM IPv4 fact from ipAddresses list
+    set_fact:
+      vm_ip: "{{ external_iface[0].ipAddresses
+        | select('match', '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$')
+        | list
         | first }}"
+    when: external_iface[0].ipAddresses is defined
+
+  - name: Set VM IPv4 fact from ipAddress field
+    set_fact:
+      vm_ip: "{{ external_iface[0].ipAddress }}"
+    when:
+    - vm_ip is not defined or vm_ip == ''
+    - external_iface[0].ipAddress is defined
+    - external_iface[0].ipAddress | regex_search('^[0-9]')
 
   - name: Fail if no IPv4 found
     fail:
-      msg: "No IPv4 address found for VM {{ vm_name }}"
+      msg: "No IPv4 found. Interfaces: {{ vmi_info.resources[0].status.interfaces }}"
     when: vm_ip is not defined or vm_ip == ''
 
   - name: Display VM details
