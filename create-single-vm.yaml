@@ -6,7 +6,7 @@
     vm_name: "rhel9-vm-01"
     namespace: "aap-vms"
     memory: "2Gi"
-    cpu_cores: 2
+    cpu_cores: 1
     disk_size: "30Gi"
     storage_class: "nfs-dynamic"
     os_image: "rhel9"
@@ -48,8 +48,8 @@
       namespace: "{{ namespace }}"
     register: dv_status
     until: dv_status.resources[0].status.phase == "Succeeded"
-    retries: 60
-    delay: 10
+    retries: 120
+    delay: 15
 
   - name: Create VirtualMachine
     kubernetes.core.k8s:
