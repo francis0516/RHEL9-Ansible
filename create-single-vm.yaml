@@ -4,7 +4,7 @@
   gather_facts: false
   vars:
     vm_name: "rhel9-vm-01"
-    namespace: "aap-vms"
+    vm_namespace: "aap-vms"
     memory: "2Gi"
     cpu_cores: 1
     disk_size: "30Gi"
@@ -14,7 +14,7 @@
     nad_name: "aap-vms/external-network"
     ssh_user: "rhel"
     ssh_password: "redhat123"
-    ssh_public_key: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+    ssh_public_key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCrT/FQB95dacW2M8XI49Bkw8XqLxSoi4ezOLjodLHiVMjyWgCm64aMOa6SRp37gz+1bqTlsu5GYvZ9+nWgmuXYqvCGTny7UmZqUXmfNG1cy7TTWp/zzgAFYN3yLt9kTYi5/u9V3jIFxT9W64Ed47Ik/q07WLVBO+C1FxiKzFxzGwkOy60iFXSa/xx7oiVQ1rWsMADahZdtGNhwsXGmbRnqmbOCktg5mkh6cMaYVNL6rrvfL3a135o7+Oga5ekfemE0/MTQ/uo+YLhcsPchn95EpnwC8PS8IND4oRP7eInodC1qWo9C6Qznr93Be4R4GBQCEtplLY1hfzqf85jqndb5rD2rzd+zi+xaHtqdiiWk/UKXA/d7UWt5XnwRwBaOgp5INbOlrePQ2y/bnM/iivcqjax0EBrn3ysnpgDP3ohxhfWAS/jhu0bDwxX/dU58+1JvtehGOUuWXUkthg1i/zQe1tAMj0lhBOTZBbWBraElsWR9C6lp7C6M967JOGK88Gs= opsadm@ocp-service.henogez.com"
 
   tasks:
   - name: Create DataVolume for VM disk
@@ -25,7 +25,7 @@
         kind: DataVolume
         metadata:
           name: "{{ vm_name }}-disk"
-          namespace: "{{ namespace }}"
+          namespace: "{{ vm_namespace }}"
         spec:
           source:
             pvc:
@@ -45,9 +45,12 @@
       api_version: cdi.kubevirt.io/v1beta1
       kind: DataVolume
       name: "{{ vm_name }}-disk"
-      namespace: "{{ namespace }}"
+      namespace: "{{ vm_namespace }}"
     register: dv_status
-    until: dv_status.resources[0].status.phase == "Succeeded"
+    until:
+    - dv_status.resources | length > 0
+    - dv_status.resources[0].status.phase is defined
+    - dv_status.resources[0].status.phase == "Succeeded"
     retries: 120
     delay: 15
 
@@ -59,7 +62,7 @@
         kind: VirtualMachine
         metadata:
           name: "{{ vm_name }}"
-          namespace: "{{ namespace }}"
+          namespace: "{{ vm_namespace }}"
         spec:
           running: true
           template:
@@ -113,10 +116,11 @@
       api_version: kubevirt.io/v1
       kind: VirtualMachineInstance
       name: "{{ vm_name }}"
-      namespace: "{{ namespace }}"
+      namespace: "{{ vm_namespace }}"
     register: vmi_status
     until:
     - vmi_status.resources | length > 0
+    - vmi_status.resources[0].status.phase is defined
     - vmi_status.resources[0].status.phase == "Running"
     retries: 60
     delay: 10
@@ -126,32 +130,35 @@
       api_version: kubevirt.io/v1
       kind: VirtualMachineInstance
       name: "{{ vm_name }}"
-      namespace: "{{ namespace }}"
+      namespace: "{{ vm_namespace }}"
     register: vmi_info
 
   - name: Set VM IP fact
     set_fact:
       vm_ip: "{{ vmi_info.resources[0].status.interfaces | selectattr('name', 'equalto', 'external') | map(attribute='ipAddress') | first }}"
+    failed_when: vm_ip is not defined or vm_ip == ''
 
   - name: Display VM details
     debug:
       msg:
       - "VM Name: {{ vm_name }}"
-      - "VM IP: {{ vm_ip }}"
-      - "SSH: ssh {{ ssh_user }}@{{ vm_ip }}"
+      - "VM IP:   {{ vm_ip }}"
+      - "SSH:     ssh {{ ssh_user }}@{{ vm_ip }}"
+      - "Pass:    {{ ssh_password }}"
 
   - name: Wait for SSH to be available
     wait_for:
       host: "{{ vm_ip }}"
       port: 22
-      timeout: 120
+      timeout: 180
+      delay: 10
 
   - name: Add VM to inventory
     add_host:
       name: "{{ vm_name }}"
       ansible_host: "{{ vm_ip }}"
       ansible_user: "{{ ssh_user }}"
-      ansible_ssh_private_key_file: "~/.ssh/id_rsa"
+      ansible_password: "{{ ssh_password }}"
       ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
       groups: new_vms
 
