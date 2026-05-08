@@ -133,10 +133,23 @@
       namespace: "{{ vm_namespace }}"
     register: vmi_info
 
-  - name: Set VM IP fact
+  - name: Get all IPs from external interface
     set_fact:
-      vm_ip: "{{ vmi_info.resources[0].status.interfaces | selectattr('name', 'equalto', 'external') | map(attribute='ipAddress') | first }}"
-    failed_when: vm_ip is not defined or vm_ip == ''
+      all_ips: "{{ vmi_info.resources[0].status.interfaces
+        | selectattr('name', 'equalto', 'external')
+        | map(attribute='ipAddresses')
+        | first }}"
+
+  - name: Set VM IPv4 fact
+    set_fact:
+      vm_ip: "{{ all_ips
+        | select('match', '^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$')
+        | first }}"
+
+  - name: Fail if no IPv4 found
+    fail:
+      msg: "No IPv4 address found for VM {{ vm_name }}"
+    when: vm_ip is not defined or vm_ip == ''
 
   - name: Display VM details
     debug:
