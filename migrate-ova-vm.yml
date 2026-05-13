@@ -132,7 +132,7 @@
             namespace: {{ mtv_namespace }}
           spec:
             type: ova
-            url: "nfs://{{ nfs_server }}:{{ nfs_path }}"
+            url: "{{ nfs_server }}:{{ nfs_path }}"
             secret:
               name: ""
               namespace: {{ mtv_namespace }}
