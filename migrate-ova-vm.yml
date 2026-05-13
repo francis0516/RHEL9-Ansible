@@ -58,6 +58,14 @@
       changed_when: false
       failed_when: oc_version.rc != 0
 
+    - name: Login to OCP
+      command: >
+        oc login https://api.ocp4.henogez.com:6443
+        --token={{ lookup('env', 'K8S_AUTH_API_KEY') }}
+        --insecure-skip-tls-verify=true
+      no_log: true
+      changed_when: false
+
     - name: Check OCP connectivity
       command: "{{ oc_binary }} whoami"
       register: oc_whoami
