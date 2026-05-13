@@ -16,6 +16,7 @@
     # VM details
     vm_name: "SERVER-A 20"
     vm_name_sanitized: "server-a-20"
+    nfs_mount_point: "/mnt/ocp4-export"
 
     # OCP/MTV settings
     mtv_namespace: "openshift-mtv"
