@@ -16,7 +16,7 @@
     # VM details
     vm_name: "SERVER-A 20"
     vm_name_sanitized: "server-a-20"
-    nfs_mount_point: "/mnt/ocp4-export"
+    
 
     # OCP/MTV settings
     mtv_namespace: "openshift-mtv"
@@ -141,6 +141,7 @@
       find:
         paths: "{{ nfs_mount_point }}"
         patterns: "*.ovf,*.vmdk"
+        recurse: yes
       register: ovf_files
       failed_when: ovf_files.matched == 0
 
