@@ -125,6 +125,7 @@
         path: "{{ nfs_mount_point }}"
         state: directory
         mode: '0755'
+      when: false
 
     - name: Mount NFS share
       mount:
@@ -133,6 +134,7 @@
         fstype: nfs
         state: mounted
       register: nfs_mount
+      when: false
 
     - name: Check OVF files exist on NFS share
       find:
