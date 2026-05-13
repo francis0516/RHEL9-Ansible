@@ -1,11 +1,6 @@
 ---
 # Ansible Playbook: Migrate VM from VMware to OpenShift Virtualization via OVA
 # Usage: ansible-playbook migrate-ova-vm.yml
-# Requirements: oc CLI, ansible, community.okd or kubernetes.core collection
-#
-# Install required collections:
-#   ansible-galaxy collection install kubernetes.core
-#   ansible-galaxy collection install community.general
 
 - name: Migrate SERVER-A-20 from VMware to OpenShift Virtualization
   hosts: localhost
@@ -16,7 +11,6 @@
     # VM details
     vm_name: "SERVER-A 20"
     vm_name_sanitized: "server-a-20"
-    
 
     # OCP/MTV settings
     mtv_namespace: "openshift-mtv"
@@ -27,13 +21,11 @@
     ova_provider_name: "ova-provider"
     nfs_server: "10.0.0.25"
     nfs_path: "/ocp4-exports"
-    nfs_mount_point: "/mnt/ocp4-exports"
 
     # Network and Storage mappings
     network_map_name: "ova-network-map"
     storage_map_name: "ova-storage-map"
     source_network: "VM Network"
-    target_network: "pod"  # Pod networking
     target_storage_class: "thin-csi-immediate"
 
     # Migration plan settings
@@ -118,38 +110,6 @@
       failed_when: link_secret.rc != 0 and 'already exists' not in link_secret.stderr
 
     # ============================================================
-    # NFS MOUNT AND VERIFY OVA FILES
-    # ============================================================
-
-    - name: Create NFS mount point
-      file:
-        path: "{{ nfs_mount_point }}"
-        state: directory
-        mode: '0755'
-      when: false
-
-    - name: Mount NFS share
-      mount:
-        path: "{{ nfs_mount_point }}"
-        src: "{{ nfs_server }}:{{ nfs_path }}"
-        fstype: nfs
-        state: mounted
-      register: nfs_mount
-      when: false
-
-    - name: Check OVF files exist on NFS share
-      find:
-        paths: "{{ nfs_mount_point }}"
-        patterns: "*.ovf,*.vmdk"
-        recurse: yes
-      register: ovf_files
-      failed_when: ovf_files.matched == 0
-
-    - name: Display found OVF files
-      debug:
-        msg: "Found OVF files: {{ ovf_files.files | map(attribute='path') | list }}"
-
-    # ============================================================
     # CREATE OVA PROVIDER
     # ============================================================
 
@@ -198,20 +158,6 @@
       register: netmap_check
       changed_when: false
       failed_when: false
-
-    - name: Get host provider ID
-      command: >
-        {{ oc_binary }} get provider host -n {{ mtv_namespace }}
-        -o jsonpath='{.metadata.uid}'
-      register: host_provider_uid
-      changed_when: false
-
-    - name: Get OVA provider ID
-      command: >
-        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
-        -o jsonpath='{.metadata.uid}'
-      register: ova_provider_uid
-      changed_when: false
 
     - name: Create network map
       when: netmap_check.rc != 0
@@ -294,24 +240,6 @@
       changed_when: false
 
     # ============================================================
-    # GET VM ID FROM OVA PROVIDER
-    # ============================================================
-
-    - name: Get OVA provider inventory URL
-      command: >
-        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
-        -o jsonpath='{.status.inventory.url}'
-      register: inventory_url
-      changed_when: false
-
-    - name: Get VM list from OVA provider inventory
-      command: >
-        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
-        -o jsonpath='{.status.conditions}'
-      register: vm_inventory
-      changed_when: false
-
-    # ============================================================
     # CREATE MIGRATION PLAN
     # ============================================================
 
@@ -320,13 +248,6 @@
       register: plan_check
       changed_when: false
       failed_when: false
-
-    - name: Get VM ID from OVA provider
-      command: >
-        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
-        -o jsonpath='{.metadata.uid}'
-      register: vm_provider_uid
-      changed_when: false
 
     - name: Create migration plan
       when: plan_check.rc != 0
@@ -403,11 +324,7 @@
         {{ oc_binary }} get migration {{ migration_name }} -n {{ mtv_namespace }}
         -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}'
       register: migration_done
-      until: >
-        migration_done.stdout == "True" or
-        (migration_done.stdout == "" and
-         lookup('pipe', oc_binary + ' get migration ' + migration_name + ' -n ' + mtv_namespace +
-         ' -o jsonpath={.status.conditions[?(@.type==\"Failed\")].status}') == 'True')
+      until: migration_done.stdout == "True"
       retries: "{{ migration_timeout // 30 }}"
       delay: 30
       changed_when: false
