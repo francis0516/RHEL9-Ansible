@@ -133,6 +133,9 @@
           spec:
             type: ova
             url: "nfs://{{ nfs_server }}:{{ nfs_path }}"
+            secret:
+              name: ""
+              namespace: {{ mtv_namespace }}
       register: create_provider
 
     - name: Wait for OVA provider to be Ready
