@@ -121,14 +121,12 @@
     # ============================================================
 
     - name: Create NFS mount point
-      become: true
       file:
         path: "{{ nfs_mount_point }}"
         state: directory
         mode: '0755'
 
     - name: Mount NFS share
-      become: true
       mount:
         path: "{{ nfs_mount_point }}"
         src: "{{ nfs_server }}:{{ nfs_path }}"
