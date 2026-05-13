@@ -17,8 +17,8 @@
     target_namespace: "vms-import"
     oc_binary: "oc"
 
-    # OVA Provider settings
-    ova_provider_name: "ova-provider"
+    # OVA Provider settings - using existing ready provider
+    ova_provider_name: "vsphere-ova"
     nfs_server: "10.0.0.25"
     nfs_path: "/ocp4-exports"
 
@@ -29,8 +29,8 @@
     target_storage_class: "thin-csi-immediate"
 
     # Migration plan settings
-    migration_plan_name: "migrate-vms"
-    migration_name: "migrate-vms-run1"
+    migration_plan_name: "migrate-server-a-20"
+    migration_name: "migrate-server-a-20-run1"
 
     # Pull secret for internal registry
     internal_registry: "image-registry.openshift-image-registry.svc:5000"
@@ -110,43 +110,16 @@
       failed_when: link_secret.rc != 0 and 'already exists' not in link_secret.stderr
 
     # ============================================================
-    # CREATE OVA PROVIDER
+    # VERIFY OVA PROVIDER
     # ============================================================
 
-    - name: Check if OVA provider already exists
-      command: "{{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}"
-      register: provider_check
-      changed_when: false
-      failed_when: false
-
-    - name: Create OVA provider
-      when: provider_check.rc != 0
-      command: >
-        {{ oc_binary }} apply -f -
-      args:
-        stdin: |
-          apiVersion: forklift.konveyor.io/v1beta1
-          kind: Provider
-          metadata:
-            name: {{ ova_provider_name }}
-            namespace: {{ mtv_namespace }}
-          spec:
-            type: ova
-            url: "{{ nfs_server }}:{{ nfs_path }}"
-            secret:
-              name: ""
-              namespace: {{ mtv_namespace }}
-      register: create_provider
-
-    - name: Wait for OVA provider to be Ready
+    - name: Check OVA provider exists and is Ready
       command: >
         {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
         -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
       register: provider_ready
-      until: provider_ready.stdout == "True"
-      retries: "{{ provider_ready_timeout // 10 }}"
-      delay: 10
       changed_when: false
+      failed_when: provider_ready.stdout != "True"
 
     - name: Display provider status
       debug:
@@ -197,6 +170,10 @@
       delay: 10
       changed_when: false
 
+    - name: Display network map status
+      debug:
+        msg: "Network map {{ network_map_name }} is Ready"
+
     # ============================================================
     # CREATE STORAGE MAP
     # ============================================================
@@ -206,6 +183,13 @@
       register: storemap_check
       changed_when: false
       failed_when: false
+
+    - name: Get OVA provider storage ID
+      command: >
+        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.status.inventory.url}'
+      register: provider_inventory
+      changed_when: false
 
     - name: Create storage map
       when: storemap_check.rc != 0
@@ -221,7 +205,7 @@
           spec:
             map:
               - source:
-                  name: ""
+                  id: ""
                 destination:
                   storageClass: {{ target_storage_class }}
             provider:
@@ -241,6 +225,10 @@
       retries: 30
       delay: 10
       changed_when: false
+
+    - name: Display storage map status
+      debug:
+        msg: "Storage map {{ storage_map_name }} is Ready"
 
     # ============================================================
     # CREATE MIGRATION PLAN
