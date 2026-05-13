@@ -1,0 +1,441 @@
+---
+# Ansible Playbook: Migrate VM from VMware to OpenShift Virtualization via OVA
+# Usage: ansible-playbook migrate-ova-vm.yml
+# Requirements: oc CLI, ansible, community.okd or kubernetes.core collection
+#
+# Install required collections:
+#   ansible-galaxy collection install kubernetes.core
+#   ansible-galaxy collection install community.general
+
+- name: Migrate SERVER-A-20 from VMware to OpenShift Virtualization
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # VM details
+    vm_name: "SERVER-A 20"
+    vm_name_sanitized: "server-a-20"
+
+    # OCP/MTV settings
+    mtv_namespace: "openshift-mtv"
+    target_namespace: "vms-import"
+    oc_binary: "oc"
+
+    # OVA Provider settings
+    ova_provider_name: "ova-provider"
+    nfs_server: "10.0.0.25"
+    nfs_path: "/ocp4-exports"
+    nfs_mount_point: "/mnt/ocp4-exports"
+
+    # Network and Storage mappings
+    network_map_name: "ova-network-map"
+    storage_map_name: "ova-storage-map"
+    source_network: "VM Network"
+    target_network: "pod"  # Pod networking
+    target_storage_class: "thin-csi-immediate"
+
+    # Migration plan settings
+    migration_plan_name: "migrate-vms"
+    migration_name: "migrate-vms-run1"
+
+    # Pull secret for internal registry
+    internal_registry: "image-registry.openshift-image-registry.svc:5000"
+
+    # Timeouts
+    provider_ready_timeout: 300
+    migration_timeout: 7200  # 2 hours
+
+  tasks:
+
+    # ============================================================
+    # PRE-FLIGHT CHECKS
+    # ============================================================
+
+    - name: Check oc CLI is available
+      command: "{{ oc_binary }} version --client"
+      register: oc_version
+      changed_when: false
+      failed_when: oc_version.rc != 0
+
+    - name: Check OCP connectivity
+      command: "{{ oc_binary }} whoami"
+      register: oc_whoami
+      changed_when: false
+      failed_when: oc_whoami.rc != 0
+
+    - name: Display current user
+      debug:
+        msg: "Logged in as: {{ oc_whoami.stdout }}"
+
+    - name: Check MTV namespace exists
+      command: "{{ oc_binary }} get namespace {{ mtv_namespace }}"
+      register: mtv_ns_check
+      changed_when: false
+      failed_when: mtv_ns_check.rc != 0
+
+    # ============================================================
+    # SETUP TARGET NAMESPACE
+    # ============================================================
+
+    - name: Create target namespace if it doesn't exist
+      command: "{{ oc_binary }} create namespace {{ target_namespace }}"
+      register: create_ns
+      changed_when: create_ns.rc == 0
+      failed_when: create_ns.rc != 0 and 'already exists' not in create_ns.stderr
+
+    - name: Get OCP token for pull secret
+      command: "{{ oc_binary }} whoami -t"
+      register: ocp_token
+      changed_when: false
+
+    - name: Create internal registry pull secret in target namespace
+      command: >
+        {{ oc_binary }} create secret docker-registry internal-registry-pull
+        --docker-server={{ internal_registry }}
+        --docker-username={{ oc_whoami.stdout }}
+        --docker-password={{ ocp_token.stdout }}
+        -n {{ target_namespace }}
+      register: create_secret
+      changed_when: create_secret.rc == 0
+      failed_when: create_secret.rc != 0 and 'already exists' not in create_secret.stderr
+
+    - name: Link pull secret to default service account
+      command: >
+        {{ oc_binary }} secrets link default internal-registry-pull
+        --for=pull -n {{ target_namespace }}
+      register: link_secret
+      changed_when: link_secret.rc == 0
+      failed_when: link_secret.rc != 0 and 'already exists' not in link_secret.stderr
+
+    # ============================================================
+    # NFS MOUNT AND VERIFY OVA FILES
+    # ============================================================
+
+    - name: Create NFS mount point
+      become: true
+      file:
+        path: "{{ nfs_mount_point }}"
+        state: directory
+        mode: '0755'
+
+    - name: Mount NFS share
+      become: true
+      mount:
+        path: "{{ nfs_mount_point }}"
+        src: "{{ nfs_server }}:{{ nfs_path }}"
+        fstype: nfs
+        state: mounted
+      register: nfs_mount
+
+    - name: Check OVF files exist on NFS share
+      find:
+        paths: "{{ nfs_mount_point }}"
+        patterns: "*.ovf,*.vmdk"
+      register: ovf_files
+      failed_when: ovf_files.matched == 0
+
+    - name: Display found OVF files
+      debug:
+        msg: "Found OVF files: {{ ovf_files.files | map(attribute='path') | list }}"
+
+    # ============================================================
+    # CREATE OVA PROVIDER
+    # ============================================================
+
+    - name: Check if OVA provider already exists
+      command: "{{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}"
+      register: provider_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create OVA provider
+      when: provider_check.rc != 0
+      command: >
+        {{ oc_binary }} apply -f -
+      args:
+        stdin: |
+          apiVersion: forklift.konveyor.io/v1beta1
+          kind: Provider
+          metadata:
+            name: {{ ova_provider_name }}
+            namespace: {{ mtv_namespace }}
+          spec:
+            type: ova
+            url: "nfs://{{ nfs_server }}:{{ nfs_path }}"
+      register: create_provider
+
+    - name: Wait for OVA provider to be Ready
+      command: >
+        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: provider_ready
+      until: provider_ready.stdout == "True"
+      retries: "{{ provider_ready_timeout // 10 }}"
+      delay: 10
+      changed_when: false
+
+    - name: Display provider status
+      debug:
+        msg: "OVA Provider {{ ova_provider_name }} is Ready"
+
+    # ============================================================
+    # CREATE NETWORK MAP
+    # ============================================================
+
+    - name: Check if network map already exists
+      command: "{{ oc_binary }} get networkmap {{ network_map_name }} -n {{ mtv_namespace }}"
+      register: netmap_check
+      changed_when: false
+      failed_when: false
+
+    - name: Get host provider ID
+      command: >
+        {{ oc_binary }} get provider host -n {{ mtv_namespace }}
+        -o jsonpath='{.metadata.uid}'
+      register: host_provider_uid
+      changed_when: false
+
+    - name: Get OVA provider ID
+      command: >
+        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.metadata.uid}'
+      register: ova_provider_uid
+      changed_when: false
+
+    - name: Create network map
+      when: netmap_check.rc != 0
+      command: >
+        {{ oc_binary }} apply -f -
+      args:
+        stdin: |
+          apiVersion: forklift.konveyor.io/v1beta1
+          kind: NetworkMap
+          metadata:
+            name: {{ network_map_name }}
+            namespace: {{ mtv_namespace }}
+          spec:
+            map:
+              - source:
+                  name: "{{ source_network }}"
+                destination:
+                  type: pod
+            provider:
+              source:
+                name: {{ ova_provider_name }}
+                namespace: {{ mtv_namespace }}
+              destination:
+                name: host
+                namespace: {{ mtv_namespace }}
+
+    - name: Wait for network map to be Ready
+      command: >
+        {{ oc_binary }} get networkmap {{ network_map_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: netmap_ready
+      until: netmap_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    # ============================================================
+    # CREATE STORAGE MAP
+    # ============================================================
+
+    - name: Check if storage map already exists
+      command: "{{ oc_binary }} get storagemap {{ storage_map_name }} -n {{ mtv_namespace }}"
+      register: storemap_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create storage map
+      when: storemap_check.rc != 0
+      command: >
+        {{ oc_binary }} apply -f -
+      args:
+        stdin: |
+          apiVersion: forklift.konveyor.io/v1beta1
+          kind: StorageMap
+          metadata:
+            name: {{ storage_map_name }}
+            namespace: {{ mtv_namespace }}
+          spec:
+            map:
+              - source:
+                  name: ""
+                destination:
+                  storageClass: {{ target_storage_class }}
+            provider:
+              source:
+                name: {{ ova_provider_name }}
+                namespace: {{ mtv_namespace }}
+              destination:
+                name: host
+                namespace: {{ mtv_namespace }}
+
+    - name: Wait for storage map to be Ready
+      command: >
+        {{ oc_binary }} get storagemap {{ storage_map_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: storemap_ready
+      until: storemap_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    # ============================================================
+    # GET VM ID FROM OVA PROVIDER
+    # ============================================================
+
+    - name: Get OVA provider inventory URL
+      command: >
+        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.status.inventory.url}'
+      register: inventory_url
+      changed_when: false
+
+    - name: Get VM list from OVA provider inventory
+      command: >
+        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.status.conditions}'
+      register: vm_inventory
+      changed_when: false
+
+    # ============================================================
+    # CREATE MIGRATION PLAN
+    # ============================================================
+
+    - name: Check if migration plan already exists
+      command: "{{ oc_binary }} get plan {{ migration_plan_name }} -n {{ mtv_namespace }}"
+      register: plan_check
+      changed_when: false
+      failed_when: false
+
+    - name: Get VM ID from OVA provider
+      command: >
+        {{ oc_binary }} get provider {{ ova_provider_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.metadata.uid}'
+      register: vm_provider_uid
+      changed_when: false
+
+    - name: Create migration plan
+      when: plan_check.rc != 0
+      command: >
+        {{ oc_binary }} apply -f -
+      args:
+        stdin: |
+          apiVersion: forklift.konveyor.io/v1beta1
+          kind: Plan
+          metadata:
+            name: {{ migration_plan_name }}
+            namespace: {{ mtv_namespace }}
+          spec:
+            provider:
+              source:
+                name: {{ ova_provider_name }}
+                namespace: {{ mtv_namespace }}
+              destination:
+                name: host
+                namespace: {{ mtv_namespace }}
+            map:
+              network:
+                name: {{ network_map_name }}
+                namespace: {{ mtv_namespace }}
+              storage:
+                name: {{ storage_map_name }}
+                namespace: {{ mtv_namespace }}
+            targetNamespace: {{ target_namespace }}
+            vms:
+              - name: "{{ vm_name }}"
+
+    - name: Wait for migration plan to be Ready
+      command: >
+        {{ oc_binary }} get plan {{ migration_plan_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: plan_ready
+      until: plan_ready.stdout == "True"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Display plan status
+      debug:
+        msg: "Migration plan {{ migration_plan_name }} is Ready"
+
+    # ============================================================
+    # START MIGRATION
+    # ============================================================
+
+    - name: Check if migration already exists
+      command: "{{ oc_binary }} get migration {{ migration_name }} -n {{ mtv_namespace }}"
+      register: migration_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create and start migration
+      when: migration_check.rc != 0
+      command: >
+        {{ oc_binary }} apply -f -
+      args:
+        stdin: |
+          apiVersion: forklift.konveyor.io/v1beta1
+          kind: Migration
+          metadata:
+            name: {{ migration_name }}
+            namespace: {{ mtv_namespace }}
+          spec:
+            plan:
+              name: {{ migration_plan_name }}
+              namespace: {{ mtv_namespace }}
+
+    - name: Wait for migration to complete
+      command: >
+        {{ oc_binary }} get migration {{ migration_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}'
+      register: migration_done
+      until: >
+        migration_done.stdout == "True" or
+        (migration_done.stdout == "" and
+         lookup('pipe', oc_binary + ' get migration ' + migration_name + ' -n ' + mtv_namespace +
+         ' -o jsonpath={.status.conditions[?(@.type==\"Failed\")].status}') == 'True')
+      retries: "{{ migration_timeout // 30 }}"
+      delay: 30
+      changed_when: false
+
+    # ============================================================
+    # VERIFY MIGRATION
+    # ============================================================
+
+    - name: Check migration final status
+      command: >
+        {{ oc_binary }} get migration {{ migration_name }} -n {{ mtv_namespace }}
+        -o jsonpath='{.status.conditions}'
+      register: migration_status
+      changed_when: false
+
+    - name: Check if VM is running in OpenShift
+      command: >
+        {{ oc_binary }} get vm {{ vm_name_sanitized }} -n {{ target_namespace }}
+        -o jsonpath='{.status.ready}'
+      register: vm_ready
+      changed_when: false
+      failed_when: false
+
+    - name: Display migration result
+      debug:
+        msg: >
+          Migration completed!
+          VM '{{ vm_name }}' migrated to '{{ vm_name_sanitized }}'
+          in namespace '{{ target_namespace }}'.
+          VM Ready: {{ vm_ready.stdout | default('unknown') }}
+
+    - name: Get VM details
+      command: >
+        {{ oc_binary }} get vm {{ vm_name_sanitized }} -n {{ target_namespace }}
+      register: vm_details
+      changed_when: false
+      failed_when: false
+
+    - name: Display VM details
+      debug:
+        msg: "{{ vm_details.stdout }}"
